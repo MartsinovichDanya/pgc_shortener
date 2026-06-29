@@ -1,36 +1,29 @@
 package main
 
 import (
-	"context"
 	"crypto/rand"
-	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math/big"
 	"net/http"
 	"net/url"
-	"os"
-	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
-	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 )
 
 // ---------- Конфигурация ----------
 const (
-	defaultAddr     = "localhost:8080"        // адрес и порт сервера
-	baseURL         = "http://localhost:8080" // базовый URL для сокращённых ссылок
-	idLength        = 8                       // длина генерируемого идентификатора
-	maxBodySize     = 2048                    // максимальный размер тела запроса (байт)
-	readTimeout     = 5 * time.Second         // таймаут чтения запроса
-	writeTimeout    = 10 * time.Second        // таймаут записи ответа
-	shutdownTimeout = 5 * time.Second         // таймаут плавного завершения
+	defaultAddr = "localhost:8080"
+	baseURL     = "http://localhost:8080"
+	idLength    = 8
+	maxBodySize = 2048
 )
 
 // ---------- Хранилище ----------
-// Потокобезопасное отображение короткий_id -> оригинальный_URL
 type Store struct {
 	mu   sync.RWMutex
 	data map[string]string
@@ -79,24 +72,8 @@ func NewShortenerHandler(store *Store) *ShortenerHandler {
 	return &ShortenerHandler{store: store}
 }
 
-// Главный маршрутизатор: различает POST / и GET /{id}
-func (h *ShortenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	log.Printf("Запрос: %s %s", r.Method, r.URL.Path)
-
-	switch {
-	case r.Method == http.MethodPost && r.URL.Path == "/":
-		h.createShortLink(w, r)
-	case r.Method == http.MethodGet && strings.Count(r.URL.Path, "/") == 1 && len(r.URL.Path) > 1:
-		h.redirect(w, r)
-	default:
-		// Любой другой запрос считается некорректным → 400
-		http.Error(w, "Некорректный запрос", http.StatusBadRequest)
-	}
-}
-
 // POST / – создание короткой ссылки
 func (h *ShortenerHandler) createShortLink(w http.ResponseWriter, r *http.Request) {
-	// Ограничиваем размер тела
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
 	if err != nil {
 		log.Printf("Ошибка чтения тела: %v", err)
@@ -111,13 +88,11 @@ func (h *ShortenerHandler) createShortLink(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Базовая валидация URL
 	if !isValidURL(originalURL) {
 		http.Error(w, "Некорректный URL", http.StatusBadRequest)
 		return
 	}
 
-	// Генерируем уникальный идентификатор
 	id, err := generateID()
 	if err != nil {
 		log.Printf("Ошибка генерации ID: %v", err)
@@ -125,12 +100,9 @@ func (h *ShortenerHandler) createShortLink(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Сохраняем в хранилище
 	h.store.Save(id, originalURL)
-
 	shortURL := fmt.Sprintf("%s/%s", baseURL, id)
 
-	// Отправляем ответ 201
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusCreated)
 	fmt.Fprint(w, shortURL)
@@ -138,10 +110,9 @@ func (h *ShortenerHandler) createShortLink(w http.ResponseWriter, r *http.Reques
 
 // GET /{id} – перенаправление на оригинальный URL
 func (h *ShortenerHandler) redirect(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/")
+	id := chi.URLParam(r, "id") // извлечение параметра маршрута
 	originalURL, found := h.store.Get(id)
 	if !found {
-		// Несуществующий идентификатор теперь также считается некорректным запросом
 		log.Printf("Идентификатор %s не найден", id)
 		http.Error(w, "Некорректный запрос", http.StatusBadRequest)
 		return
@@ -152,7 +123,7 @@ func (h *ShortenerHandler) redirect(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusTemporaryRedirect)
 }
 
-// Проверка корректности URL (должен содержать схему http/https)
+// Проверка корректности URL
 func isValidURL(raw string) bool {
 	parsed, err := url.ParseRequestURI(raw)
 	if err != nil {
@@ -161,36 +132,31 @@ func isValidURL(raw string) bool {
 	return parsed.Scheme == "http" || parsed.Scheme == "https"
 }
 
+func newRouter(store *Store) chi.Router {
+	handler := NewShortenerHandler(store)
+	r := chi.NewRouter()
+
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
+
+	r.Post("/", handler.createShortLink)
+	r.Get("/{id}", handler.redirect)
+
+	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Некорректный запрос", http.StatusBadRequest)
+	})
+
+	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Некорректный запрос", http.StatusBadRequest)
+	})
+
+	return r
+}
+
 // ---------- Запуск сервера с плавным завершением ----------
 func main() {
 	store := NewStore()
-	handler := NewShortenerHandler(store)
+	r := newRouter(store)
 
-	server := &http.Server{
-		Addr:         defaultAddr,
-		Handler:      handler,
-		ReadTimeout:  readTimeout,
-		WriteTimeout: writeTimeout,
-	}
-
-	// Запуск сервера в горутине
-	go func() {
-		log.Printf("Сервис сокращения ссылок запущен на %s", defaultAddr)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("Ошибка сервера: %v", err)
-		}
-	}()
-
-	// Ожидание сигнала завершения
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	log.Println("Получен сигнал завершения, плавно останавливаем сервер...")
-
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	if err := server.Shutdown(ctx); err != nil {
-		log.Fatalf("Ошибка при остановке сервера: %v", err)
-	}
-	log.Println("Сервер остановлен")
+	log.Fatal(http.ListenAndServe(defaultAddr, r))
 }

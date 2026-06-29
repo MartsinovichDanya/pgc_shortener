@@ -6,18 +6,41 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-// Вспомогательная функция для проверки сохранённого URL после создания короткой ссылки
+// testRequest выполняет HTTP-запрос к тестовому серверу и возвращает ответ и тело.
+// Клиент настроен так, чтобы не следовать редиректам.
+func testRequest(t *testing.T, ts *httptest.Server, method, path string, body io.Reader) (*http.Response, string) {
+	t.Helper()
+	req, err := http.NewRequest(method, ts.URL+path, body)
+	require.NoError(t, err, "ошибка создания запроса")
+
+	client := &http.Client{
+		Transport: ts.Client().Transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse // не следовать редиректам
+		},
+	}
+
+	resp, err := client.Do(req)
+	require.NoError(t, err, "ошибка выполнения запроса")
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "ошибка чтения тела ответа")
+
+	return resp, string(respBody)
+}
+
+// getIDFromResponse извлекает ID из тела ответа после создания короткой ссылки.
 func getIDFromResponse(t *testing.T, body string) string {
 	t.Helper()
-	if !strings.HasPrefix(body, baseURL+"/") {
-		t.Fatalf("тело ответа должно начинаться с %s/, получено: %s", baseURL, body)
-	}
+	require.True(t, strings.HasPrefix(body, baseURL+"/"), "тело ответа должно начинаться с %s/, получено: %s", baseURL, body)
 	id := strings.TrimPrefix(body, baseURL+"/")
-	if len(id) != idLength {
-		t.Fatalf("ожидалась длина ID %d, получена %d", idLength, len(id))
-	}
+	require.Len(t, id, idLength, "ожидалась длина ID %d, получена %d", idLength, len(id))
 	return id
 }
 
@@ -25,208 +48,115 @@ func getIDFromResponse(t *testing.T, body string) string {
 
 func TestCreateShortLink_ValidURL(t *testing.T) {
 	store := NewStore()
-	handler := NewShortenerHandler(store)
+	ts := httptest.NewServer(newRouter(store))
+	defer ts.Close()
 
 	originalURL := "https://example.com/path?q=1"
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(originalURL))
-	w := httptest.NewRecorder()
+	resp, body := testRequest(t, ts, http.MethodPost, "/", strings.NewReader(originalURL))
 
-	handler.ServeHTTP(w, req)
-
-	resp := w.Result()
-
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("ожидался статус %d, получен %d", http.StatusCreated, resp.StatusCode)
-	}
-
-	if ct := resp.Header.Get("Content-Type"); ct != "text/plain" {
-		t.Errorf("ожидался Content-Type text/plain, получен %s", ct)
-	}
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("ошибка чтения тела ответа: %v", err)
-	}
-	body := string(bodyBytes)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+	assert.Equal(t, "text/plain", resp.Header.Get("Content-Type"))
 
 	id := getIDFromResponse(t, body)
 	saved, ok := store.Get(id)
-	if !ok {
-		t.Fatalf("короткий ID %s не найден в хранилище", id)
-	}
-	if saved != originalURL {
-		t.Errorf("сохранённый URL = %s, ожидался %s", saved, originalURL)
-	}
+	require.True(t, ok, "ID %s не найден в хранилище", id)
+	assert.Equal(t, originalURL, saved)
 }
 
 func TestCreateShortLink_EmptyBody(t *testing.T) {
 	store := NewStore()
-	handler := NewShortenerHandler(store)
+	ts := httptest.NewServer(newRouter(store))
+	defer ts.Close()
 
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(""))
-	w := httptest.NewRecorder()
+	resp, body := testRequest(t, ts, http.MethodPost, "/", strings.NewReader(""))
 
-	handler.ServeHTTP(w, req)
-
-	resp := w.Result()
-
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("ожидался статус %d, получен %d", http.StatusBadRequest, resp.StatusCode)
-	}
-
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	body := strings.TrimSpace(string(bodyBytes))
-	if body != "URL не может быть пустым" {
-		t.Errorf("сообщение об ошибке = %q, ожидалось \"URL не может быть пустым\"", body)
-	}
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, "URL не может быть пустым\n", body) // http.Error добавляет \n
 }
 
 func TestCreateShortLink_InvalidURL(t *testing.T) {
 	store := NewStore()
-	handler := NewShortenerHandler(store)
+	ts := httptest.NewServer(newRouter(store))
+	defer ts.Close()
 
-	invalidURL := "not-a-valid-url"
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(invalidURL))
-	w := httptest.NewRecorder()
+	resp, body := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("not-a-valid-url"))
 
-	handler.ServeHTTP(w, req)
-
-	resp := w.Result()
-
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("ожидался статус %d, получен %d", http.StatusBadRequest, resp.StatusCode)
-	}
-
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	body := strings.TrimSpace(string(bodyBytes))
-	if body != "Некорректный URL" {
-		t.Errorf("сообщение об ошибке = %q, ожидалось \"Некорректный URL\"", body)
-	}
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, "Некорректный URL\n", body)
 }
 
 func TestCreateShortLink_BodyTruncation(t *testing.T) {
 	store := NewStore()
-	handler := NewShortenerHandler(store)
+	ts := httptest.NewServer(newRouter(store))
+	defer ts.Close()
 
 	longPath := strings.Repeat("a", 3000)
 	longURL := "http://example.com/" + longPath
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(longURL))
-	w := httptest.NewRecorder()
+	resp, body := testRequest(t, ts, http.MethodPost, "/", strings.NewReader(longURL))
 
-	handler.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 
-	resp := w.Result()
-
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("ожидался статус %d, получен %d", http.StatusCreated, resp.StatusCode)
-	}
-
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	id := getIDFromResponse(t, string(bodyBytes))
-
+	id := getIDFromResponse(t, body)
 	saved, ok := store.Get(id)
-	if !ok {
-		t.Fatal("ID не найден в хранилище после усечения")
-	}
+	require.True(t, ok, "ID не найден в хранилище после усечения")
 
-	if len(saved) != maxBodySize {
-		t.Errorf("длина сохранённого URL = %d, ожидалось %d (усечение)", len(saved), maxBodySize)
-	}
-
-	if !strings.HasPrefix(longURL, saved) {
-		t.Error("сохранённый URL не является префиксом исходного")
-	}
+	assert.Len(t, saved, maxBodySize, "длина сохранённого URL должна быть равна maxBodySize")
+	assert.True(t, strings.HasPrefix(longURL, saved), "сохранённый URL не является префиксом исходного")
 }
 
 // ---------- redirect ----------
 
 func TestRedirect_ExistingID(t *testing.T) {
 	store := NewStore()
-	handler := NewShortenerHandler(store)
-
 	id := "test1234"
 	originalURL := "https://example.com/redirect-target"
 	store.Save(id, originalURL)
 
-	req := httptest.NewRequest(http.MethodGet, "/"+id, nil)
-	w := httptest.NewRecorder()
+	ts := httptest.NewServer(newRouter(store))
+	defer ts.Close()
 
-	handler.ServeHTTP(w, req)
+	resp, _ := testRequest(t, ts, http.MethodGet, "/"+id, nil)
 
-	resp := w.Result()
-
-	if resp.StatusCode != http.StatusTemporaryRedirect {
-		t.Fatalf("ожидался статус %d, получен %d", http.StatusTemporaryRedirect, resp.StatusCode)
-	}
-
-	location := resp.Header.Get("Location")
-	if location != originalURL {
-		t.Errorf("заголовок Location = %s, ожидался %s", location, originalURL)
-	}
+	assert.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
+	assert.Equal(t, originalURL, resp.Header.Get("Location"))
 }
 
 func TestRedirect_NonExistentID(t *testing.T) {
 	store := NewStore()
-	handler := NewShortenerHandler(store)
+	ts := httptest.NewServer(newRouter(store))
+	defer ts.Close()
 
-	req := httptest.NewRequest(http.MethodGet, "/nonexistent", nil)
-	w := httptest.NewRecorder()
+	resp, body := testRequest(t, ts, http.MethodGet, "/nonexistent", nil)
 
-	handler.ServeHTTP(w, req)
-
-	resp := w.Result()
-
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("ожидался статус %d для несуществующего ID, получен %d", http.StatusBadRequest, resp.StatusCode)
-	}
-
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	body := strings.TrimSpace(string(bodyBytes))
-	if body != "Некорректный запрос" {
-		t.Errorf("сообщение = %q, ожидалось \"Некорректный запрос\"", body)
-	}
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, "Некорректный запрос\n", body)
 }
 
-// ---------- ServeHTTP (маршрутизация) ----------
+// ---------- Маршрутизация ----------
 
 func TestServeHTTP_InvalidMethodOnRoot(t *testing.T) {
 	store := NewStore()
-	handler := NewShortenerHandler(store)
+	ts := httptest.NewServer(newRouter(store))
+	defer ts.Close()
 
-	req := httptest.NewRequest(http.MethodPut, "/", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	resp := w.Result()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("ожидался 400, получен %d", resp.StatusCode)
-	}
+	resp, _ := testRequest(t, ts, http.MethodPut, "/", nil)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
 func TestServeHTTP_GetRootWithoutID(t *testing.T) {
 	store := NewStore()
-	handler := NewShortenerHandler(store)
+	ts := httptest.NewServer(newRouter(store))
+	defer ts.Close()
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	resp := w.Result()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("ожидался 400, получен %d", resp.StatusCode)
-	}
+	resp, _ := testRequest(t, ts, http.MethodGet, "/", nil)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
 func TestServeHTTP_PostToInvalidPath(t *testing.T) {
 	store := NewStore()
-	handler := NewShortenerHandler(store)
+	ts := httptest.NewServer(newRouter(store))
+	defer ts.Close()
 
-	req := httptest.NewRequest(http.MethodPost, "/somepath", nil)
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	resp := w.Result()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("ожидался 400, получен %d", resp.StatusCode)
-	}
+	resp, _ := testRequest(t, ts, http.MethodPost, "/somepath", nil)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
