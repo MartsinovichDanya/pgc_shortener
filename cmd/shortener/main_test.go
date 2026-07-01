@@ -11,8 +11,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Тестовые значения, которые будут использоваться вместо глобальных констант
+const (
+	testBaseURL     = "http://localhost:8080"
+	testMaxBodySize = 2048
+	testIDLength    = 8
+)
+
 // testRequest выполняет HTTP-запрос к тестовому серверу и возвращает ответ и тело.
-// Клиент настроен так, чтобы не следовать редиректам.
 func testRequest(t *testing.T, ts *httptest.Server, method, path string, body io.Reader) (*http.Response, string) {
 	t.Helper()
 	req, err := http.NewRequest(method, ts.URL+path, body)
@@ -21,7 +27,7 @@ func testRequest(t *testing.T, ts *httptest.Server, method, path string, body io
 	client := &http.Client{
 		Transport: ts.Client().Transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse // не следовать редиректам
+			return http.ErrUseLastResponse
 		},
 	}
 
@@ -38,17 +44,22 @@ func testRequest(t *testing.T, ts *httptest.Server, method, path string, body io
 // getIDFromResponse извлекает ID из тела ответа после создания короткой ссылки.
 func getIDFromResponse(t *testing.T, body string) string {
 	t.Helper()
-	require.True(t, strings.HasPrefix(body, baseURL+"/"), "тело ответа должно начинаться с %s/, получено: %s", baseURL, body)
-	id := strings.TrimPrefix(body, baseURL+"/")
-	require.Len(t, id, idLength, "ожидалась длина ID %d, получена %d", idLength, len(id))
+	require.True(t, strings.HasPrefix(body, testBaseURL+"/"), "тело ответа должно начинаться с %s/, получено: %s", testBaseURL, body)
+	id := strings.TrimPrefix(body, testBaseURL+"/")
+	require.Len(t, id, testIDLength, "ожидалась длина ID %d, получена %d", testIDLength, len(id))
 	return id
+}
+
+// newTestRouter создаёт роутер с фиксированными тестовыми параметрами
+func newTestRouter(store *Store) http.Handler {
+	return newRouter(store, testBaseURL, testMaxBodySize, testIDLength)
 }
 
 // ---------- createShortLink ----------
 
 func TestCreateShortLink_ValidURL(t *testing.T) {
 	store := NewStore()
-	ts := httptest.NewServer(newRouter(store))
+	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
 	originalURL := "https://example.com/path?q=1"
@@ -65,18 +76,18 @@ func TestCreateShortLink_ValidURL(t *testing.T) {
 
 func TestCreateShortLink_EmptyBody(t *testing.T) {
 	store := NewStore()
-	ts := httptest.NewServer(newRouter(store))
+	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
 	resp, body := testRequest(t, ts, http.MethodPost, "/", strings.NewReader(""))
 
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	assert.Equal(t, "URL не может быть пустым\n", body) // http.Error добавляет \n
+	assert.Equal(t, "URL не может быть пустым\n", body)
 }
 
 func TestCreateShortLink_InvalidURL(t *testing.T) {
 	store := NewStore()
-	ts := httptest.NewServer(newRouter(store))
+	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
 	resp, body := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("not-a-valid-url"))
@@ -87,7 +98,7 @@ func TestCreateShortLink_InvalidURL(t *testing.T) {
 
 func TestCreateShortLink_BodyTruncation(t *testing.T) {
 	store := NewStore()
-	ts := httptest.NewServer(newRouter(store))
+	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
 	longPath := strings.Repeat("a", 3000)
@@ -100,7 +111,7 @@ func TestCreateShortLink_BodyTruncation(t *testing.T) {
 	saved, ok := store.Get(id)
 	require.True(t, ok, "ID не найден в хранилище после усечения")
 
-	assert.Len(t, saved, maxBodySize, "длина сохранённого URL должна быть равна maxBodySize")
+	assert.Len(t, saved, testMaxBodySize, "длина сохранённого URL должна быть равна testMaxBodySize")
 	assert.True(t, strings.HasPrefix(longURL, saved), "сохранённый URL не является префиксом исходного")
 }
 
@@ -112,7 +123,7 @@ func TestRedirect_ExistingID(t *testing.T) {
 	originalURL := "https://example.com/redirect-target"
 	store.Save(id, originalURL)
 
-	ts := httptest.NewServer(newRouter(store))
+	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
 	resp, _ := testRequest(t, ts, http.MethodGet, "/"+id, nil)
@@ -123,7 +134,7 @@ func TestRedirect_ExistingID(t *testing.T) {
 
 func TestRedirect_NonExistentID(t *testing.T) {
 	store := NewStore()
-	ts := httptest.NewServer(newRouter(store))
+	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
 	resp, body := testRequest(t, ts, http.MethodGet, "/nonexistent", nil)
@@ -136,7 +147,7 @@ func TestRedirect_NonExistentID(t *testing.T) {
 
 func TestServeHTTP_InvalidMethodOnRoot(t *testing.T) {
 	store := NewStore()
-	ts := httptest.NewServer(newRouter(store))
+	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
 	resp, _ := testRequest(t, ts, http.MethodPut, "/", nil)
@@ -145,7 +156,7 @@ func TestServeHTTP_InvalidMethodOnRoot(t *testing.T) {
 
 func TestServeHTTP_GetRootWithoutID(t *testing.T) {
 	store := NewStore()
-	ts := httptest.NewServer(newRouter(store))
+	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
 	resp, _ := testRequest(t, ts, http.MethodGet, "/", nil)
@@ -154,7 +165,7 @@ func TestServeHTTP_GetRootWithoutID(t *testing.T) {
 
 func TestServeHTTP_PostToInvalidPath(t *testing.T) {
 	store := NewStore()
-	ts := httptest.NewServer(newRouter(store))
+	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
 	resp, _ := testRequest(t, ts, http.MethodPost, "/somepath", nil)
