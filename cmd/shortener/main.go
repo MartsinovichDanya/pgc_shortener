@@ -13,14 +13,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-)
 
-// ---------- Конфигурация ----------
-const (
-	defaultAddr = "localhost:8080"
-	baseURL     = "http://localhost:8080"
-	idLength    = 8
-	maxBodySize = 2048
+	"github.com/MartsinovichDanya/pgc_shortener/internal/config" // замените на актуальный путь импорта
 )
 
 // ---------- Хранилище ----------
@@ -51,8 +45,8 @@ func (s *Store) Get(id string) (string, bool) {
 // ---------- Генерация короткого идентификатора ----------
 var base62Chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
-func generateID() (string, error) {
-	id := make([]byte, idLength)
+func generateID(length int) (string, error) {
+	id := make([]byte, length)
 	for i := range id {
 		idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(base62Chars))))
 		if err != nil {
@@ -65,16 +59,24 @@ func generateID() (string, error) {
 
 // ---------- Обработчики HTTP ----------
 type ShortenerHandler struct {
-	store *Store
+	store       *Store
+	baseURL     string
+	maxBodySize int
+	idLength    int
 }
 
-func NewShortenerHandler(store *Store) *ShortenerHandler {
-	return &ShortenerHandler{store: store}
+func NewShortenerHandler(store *Store, baseURL string, maxBodySize, idLength int) *ShortenerHandler {
+	return &ShortenerHandler{
+		store:       store,
+		baseURL:     baseURL,
+		maxBodySize: maxBodySize,
+		idLength:    idLength,
+	}
 }
 
 // POST / – создание короткой ссылки
 func (h *ShortenerHandler) createShortLink(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
+	body, err := io.ReadAll(io.LimitReader(r.Body, int64(h.maxBodySize)))
 	if err != nil {
 		log.Printf("Ошибка чтения тела: %v", err)
 		http.Error(w, "Ошибка чтения запроса", http.StatusBadRequest)
@@ -93,7 +95,7 @@ func (h *ShortenerHandler) createShortLink(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	id, err := generateID()
+	id, err := generateID(h.idLength)
 	if err != nil {
 		log.Printf("Ошибка генерации ID: %v", err)
 		http.Error(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
@@ -101,7 +103,7 @@ func (h *ShortenerHandler) createShortLink(w http.ResponseWriter, r *http.Reques
 	}
 
 	h.store.Save(id, originalURL)
-	shortURL := fmt.Sprintf("%s/%s", baseURL, id)
+	shortURL := fmt.Sprintf("%s/%s", h.baseURL, id)
 
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusCreated)
@@ -110,7 +112,7 @@ func (h *ShortenerHandler) createShortLink(w http.ResponseWriter, r *http.Reques
 
 // GET /{id} – перенаправление на оригинальный URL
 func (h *ShortenerHandler) redirect(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id") // извлечение параметра маршрута
+	id := chi.URLParam(r, "id")
 	originalURL, found := h.store.Get(id)
 	if !found {
 		log.Printf("Идентификатор %s не найден", id)
@@ -132,8 +134,8 @@ func isValidURL(raw string) bool {
 	return parsed.Scheme == "http" || parsed.Scheme == "https"
 }
 
-func newRouter(store *Store) chi.Router {
-	handler := NewShortenerHandler(store)
+func newRouter(store *Store, baseURL string, maxBodySize, idLength int) chi.Router {
+	handler := NewShortenerHandler(store, baseURL, maxBodySize, idLength)
 	r := chi.NewRouter()
 
 	r.Use(middleware.Logger)
@@ -153,10 +155,13 @@ func newRouter(store *Store) chi.Router {
 	return r
 }
 
-// ---------- Запуск сервера с плавным завершением ----------
+// ---------- Запуск сервера ----------
 func main() {
-	store := NewStore()
-	r := newRouter(store)
+	cfg := config.ParseFlags()
 
-	log.Fatal(http.ListenAndServe(defaultAddr, r))
+	store := NewStore()
+	r := newRouter(store, cfg.BaseURL, cfg.MaxBodySize, cfg.IdLength)
+
+	log.Printf("Сервер запущен на %s", cfg.ServerAddr)
+	log.Fatal(http.ListenAndServe(cfg.ServerAddr, r))
 }
