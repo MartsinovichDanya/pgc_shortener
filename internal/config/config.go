@@ -1,23 +1,41 @@
 package config
 
-import "flag"
+import (
+	"flag"
+	"log"
+
+	"github.com/caarlos0/env/v6"
+)
 
 // Config содержит настройки приложения.
 type Config struct {
-	ServerAddr  string // адрес запуска HTTP-сервера (флаг -a)
-	BaseURL     string // базовый адрес для сокращённого URL (флаг -b)
-	MaxBodySize int    // максимальный размер тела запроса (пока не задаётся флагом)
-	IdLength    int
+	ServerAddr  string `env:"SERVER_ADDRESS"`                  // адрес запуска HTTP-сервера (флаг -a)
+	BaseURL     string `env:"BASE_URL"`                        // базовый адрес для сокращённого URL (флаг -b)
+	MaxBodySize int    `env:"MAX_BODY_SIZE" envDefault:"2048"` // максимальный размер тела запроса (пока не задаётся флагом)
+	IdLength    int    `env:"ID_LENGTH" envDefault:"8"`
 }
 
-// ParseFlags обрабатывает аргументы командной строки и возвращает заполненную конфигурацию.
-func ParseFlags() *Config {
-	cfg := &Config{
-		MaxBodySize: 2048,
-		IdLength:    8,
+// GetConfig обрабатывает аргументы командной строки и переменные окружения, возвращает заполненную конфигурацию.
+func GetConfig() *Config {
+	var cfg Config
+	var flagServerAddr, flagBaseURL string
+
+	err := env.Parse(&cfg)
+	if err != nil {
+		log.Fatal(err)
 	}
-	flag.StringVar(&cfg.ServerAddr, "a", "localhost:8080", "адрес запуска HTTP-сервера")
-	flag.StringVar(&cfg.BaseURL, "b", "http://localhost:8080", "базовый адрес результирующего сокращённого URL")
+
+	flag.StringVar(&flagServerAddr, "a", "localhost:8080", "адрес запуска HTTP-сервера")
+	flag.StringVar(&flagBaseURL, "b", "http://localhost:8080", "базовый адрес результирующего сокращённого URL")
 	flag.Parse()
-	return cfg
+
+	if cfg.ServerAddr == "" {
+		cfg.ServerAddr = flagServerAddr
+	}
+	if cfg.BaseURL == "" {
+		cfg.BaseURL = flagBaseURL
+	}
+
+	log.Println(cfg)
+	return &cfg
 }

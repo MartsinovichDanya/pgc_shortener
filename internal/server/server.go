@@ -14,7 +14,7 @@ import (
 
 // Run инициализирует все зависимости, настраивает роутер и запускает HTTP-сервер.
 func Run() {
-	cfg := config.ParseFlags()
+	cfg := config.GetConfig()
 
 	store := storage.NewStore()
 	handler := handler.NewShortenerHandler(store, cfg.BaseURL, cfg.MaxBodySize, cfg.IdLength)
