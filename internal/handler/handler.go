@@ -3,13 +3,14 @@ package handler
 import (
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"go.uber.org/zap"
 
+	"github.com/MartsinovichDanya/pgc_shortener/internal/logger"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/storage"
 )
 
@@ -35,7 +36,7 @@ func NewShortenerHandler(store *storage.Store, baseURL string, maxBodySize, idLe
 func (h *ShortenerHandler) CreateShortLink(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, int64(h.MaxBodySize)))
 	if err != nil {
-		log.Printf("Ошибка чтения тела: %v", err)
+		logger.Log.Debug("Ошибка чтения тела", zap.Error(err))
 		http.Error(w, "Ошибка чтения запроса", http.StatusBadRequest)
 		return
 	}
@@ -54,7 +55,7 @@ func (h *ShortenerHandler) CreateShortLink(w http.ResponseWriter, r *http.Reques
 
 	id, err := storage.GenerateID(h.IDLength)
 	if err != nil {
-		log.Printf("Ошибка генерации ID: %v", err)
+		logger.Log.Debug("Ошибка генерации ID", zap.Error(err))
 		http.Error(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
 		return
 	}
@@ -72,12 +73,12 @@ func (h *ShortenerHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	originalURL, found := h.Store.Get(id)
 	if !found {
-		log.Printf("Идентификатор %s не найден", id)
+		logger.Log.Debug("Идентификатор не найден", zap.String("id", id))
 		http.Error(w, "Некорректный запрос", http.StatusBadRequest)
 		return
 	}
 
-	log.Printf("Редирект: %s -> %s", id, originalURL)
+	logger.Log.Debug("Редирект", zap.String("id", id), zap.String("originalURL", originalURL))
 	w.Header().Set("Location", originalURL)
 	w.WriteHeader(http.StatusTemporaryRedirect)
 }

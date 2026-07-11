@@ -13,6 +13,7 @@ type Config struct {
 	BaseURL     string `env:"BASE_URL"`                        // базовый адрес для сокращённого URL (флаг -b)
 	MaxBodySize int    `env:"MAX_BODY_SIZE" envDefault:"2048"` // максимальный размер тела запроса (пока не задаётся флагом)
 	IdLength    int    `env:"ID_LENGTH" envDefault:"8"`
+	LogLevel    string `env:"LOG_LEVEL" envDefault:"DEBUG"`
 }
 
 // GetConfig обрабатывает аргументы командной строки и переменные окружения, возвращает заполненную конфигурацию.
@@ -36,6 +37,5 @@ func GetConfig() *Config {
 		cfg.BaseURL = flagBaseURL
 	}
 
-	log.Println(cfg)
 	return &cfg
 }

@@ -1,26 +1,33 @@
 package server
 
 import (
-	"log"
 	"net/http"
-
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/MartsinovichDanya/pgc_shortener/internal/config"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/handler"
+	"github.com/MartsinovichDanya/pgc_shortener/internal/logger"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/storage"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"go.uber.org/zap"
 )
 
 // Run инициализирует все зависимости, настраивает роутер и запускает HTTP-сервер.
-func Run() {
+func Run() error {
 	cfg := config.GetConfig()
+
+	if err := logger.Initialize(cfg.LogLevel); err != nil {
+		return err
+	}
+	logger.Log.Debug("Running config", zap.Any("config", cfg))
 
 	store := storage.NewStore()
 	handler := handler.NewShortenerHandler(store, cfg.BaseURL, cfg.MaxBodySize, cfg.IdLength)
 
 	r := chi.NewRouter()
-	r.Use(middleware.Logger)
+	r.Use(middleware.RequestID)
+	//r.Use(middleware.RealIP)
+	r.Use(logger.GetLogger())
 	r.Use(middleware.Recoverer)
 
 	r.Post("/", handler.CreateShortLink)
@@ -33,6 +40,9 @@ func Run() {
 		http.Error(w, "Некорректный запрос", http.StatusBadRequest)
 	})
 
-	log.Printf("Сервер запущен на %s", cfg.ServerAddr)
-	log.Fatal(http.ListenAndServe(cfg.ServerAddr, r))
+	if err := http.ListenAndServe(cfg.ServerAddr, r); err != nil {
+		return err
+	}
+
+	return nil
 }
