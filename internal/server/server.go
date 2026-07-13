@@ -31,6 +31,7 @@ func Run() error {
 	r.Use(middleware.Recoverer)
 
 	r.Post("/", handler.CreateShortLink)
+	r.Post("/api/shorten", handler.ShortenAPI)
 	r.Get("/{id}", handler.Redirect)
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {

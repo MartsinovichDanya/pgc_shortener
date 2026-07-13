@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -8,9 +9,11 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/mailru/easyjson"
 	"go.uber.org/zap"
 
 	"github.com/MartsinovichDanya/pgc_shortener/internal/logger"
+	"github.com/MartsinovichDanya/pgc_shortener/internal/model"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/storage"
 )
 
@@ -68,6 +71,59 @@ func (h *ShortenerHandler) CreateShortLink(w http.ResponseWriter, r *http.Reques
 	fmt.Fprint(w, shortURL)
 }
 
+// ShortenAPI обрабатывает POST /api/shorten – создание короткой ссылки через JSON.
+func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
+	// Ограничиваем размер тела запроса
+	body, err := io.ReadAll(io.LimitReader(r.Body, int64(h.MaxBodySize)))
+	if err != nil {
+		writeJSONError(w, "Ошибка чтения запроса", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	// Десериализуем JSON в model.Request
+	var req model.Request
+	if err := easyjson.Unmarshal(body, &req); err != nil {
+		writeJSONError(w, "Некорректный JSON", http.StatusBadRequest)
+		return
+	}
+
+	originalURL := strings.TrimSpace(req.Url)
+	if originalURL == "" {
+		writeJSONError(w, "URL не может быть пустым", http.StatusBadRequest)
+		return
+	}
+
+	if !isValidURL(originalURL) {
+		writeJSONError(w, "Некорректный URL", http.StatusBadRequest)
+		return
+	}
+
+	// Генерируем уникальный идентификатор
+	id, err := storage.GenerateID(h.IDLength)
+	if err != nil {
+		logger.Log.Debug("Ошибка генерации ID", zap.Error(err))
+		writeJSONError(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
+		return
+	}
+
+	// Сохраняем в хранилище
+	h.Store.Save(id, originalURL)
+	shortURL := fmt.Sprintf("%s/%s", h.BaseURL, id)
+
+	// Формируем успешный ответ
+	resp := model.Response{Result: shortURL}
+	jsonResp, err := easyjson.Marshal(resp)
+	if err != nil {
+		writeJSONError(w, "Ошибка формирования ответа", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_, _ = w.Write(jsonResp)
+}
+
 // Redirect обрабатывает GET /{id} – перенаправление на оригинальный URL.
 func (h *ShortenerHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
@@ -81,6 +137,13 @@ func (h *ShortenerHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 	logger.Log.Debug("Редирект", zap.String("id", id), zap.String("originalURL", originalURL))
 	w.Header().Set("Location", originalURL)
 	w.WriteHeader(http.StatusTemporaryRedirect)
+}
+
+// writeJSONError отправляет JSON-ошибку с заданным статусом.
+func writeJSONError(w http.ResponseWriter, message string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
 
 // isValidURL проверяет, что строка является валидным HTTP(S) URL.
