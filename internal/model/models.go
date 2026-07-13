@@ -1,6 +1,6 @@
-//go:generate easyjson -all $GOFILE
-
 package model
+
+//go:generate easyjson -all $GOFILE
 
 //easyjson:json
 type Request struct {

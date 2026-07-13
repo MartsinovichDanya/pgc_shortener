@@ -154,3 +154,5 @@ func isValidURL(raw string) bool {
 	}
 	return parsed.Scheme == "http" || parsed.Scheme == "https"
 }
+
+// TODO:  вынести работу со ссылками в отдельную структуру в модуль service
