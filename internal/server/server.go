@@ -22,7 +22,7 @@ func Run() error {
 	logger.Log.Debug("Running config", zap.Any("config", cfg))
 
 	store := storage.NewStore()
-	handler := handler.NewShortenerHandler(store, cfg.BaseURL, cfg.MaxBodySize, cfg.IdLength)
+	handler := handler.NewShortenerHandler(store, cfg.BaseURL, cfg.MaxBodySize, cfg.IDLength)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)

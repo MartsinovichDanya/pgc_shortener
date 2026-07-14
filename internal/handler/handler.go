@@ -88,7 +88,7 @@ func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	originalURL := strings.TrimSpace(req.Url)
+	originalURL := strings.TrimSpace(req.URL)
 	if originalURL == "" {
 		writeJSONError(w, "URL не может быть пустым", http.StatusBadRequest)
 		return

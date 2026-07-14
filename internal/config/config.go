@@ -12,7 +12,7 @@ type Config struct {
 	ServerAddr  string `env:"SERVER_ADDRESS"`                  // адрес запуска HTTP-сервера (флаг -a)
 	BaseURL     string `env:"BASE_URL"`                        // базовый адрес для сокращённого URL (флаг -b)
 	MaxBodySize int    `env:"MAX_BODY_SIZE" envDefault:"2048"` // максимальный размер тела запроса (пока не задаётся флагом)
-	IdLength    int    `env:"ID_LENGTH" envDefault:"8"`
+	IDLength    int    `env:"ID_LENGTH" envDefault:"8"`
 	LogLevel    string `env:"LOG_LEVEL" envDefault:"DEBUG"`
 }
 
