@@ -100,7 +100,7 @@ func easyjsonD2b7633eDecodeGithubComMartsinovichDanyaPgcShortenerInternalModel1(
 			if in.IsNull() {
 				in.Skip()
 			} else {
-				out.Url = string(in.String())
+				out.URL = string(in.String())
 			}
 		default:
 			in.SkipRecursive()
@@ -119,7 +119,7 @@ func easyjsonD2b7633eEncodeGithubComMartsinovichDanyaPgcShortenerInternalModel1(
 	{
 		const prefix string = ",\"url\":"
 		out.RawString(prefix[1:])
-		out.String(string(in.Url))
+		out.String(string(in.URL))
 	}
 	out.RawByte('}')
 }
