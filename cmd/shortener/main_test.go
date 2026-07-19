@@ -15,6 +15,8 @@ import (
 	"github.com/MartsinovichDanya/pgc_shortener/internal/storage"
 )
 
+// TODO: покрыть тестами /api/shorten
+
 const (
 	testBaseURL     = "http://localhost:8080"
 	testMaxBodySize = 2048
