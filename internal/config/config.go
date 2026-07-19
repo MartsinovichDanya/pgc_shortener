@@ -9,17 +9,18 @@ import (
 
 // Config содержит настройки приложения.
 type Config struct {
-	ServerAddr  string `env:"SERVER_ADDRESS"`                  // адрес запуска HTTP-сервера (флаг -a)
-	BaseURL     string `env:"BASE_URL"`                        // базовый адрес для сокращённого URL (флаг -b)
-	MaxBodySize int    `env:"MAX_BODY_SIZE" envDefault:"2048"` // максимальный размер тела запроса (пока не задаётся флагом)
-	IDLength    int    `env:"ID_LENGTH" envDefault:"8"`
-	LogLevel    string `env:"LOG_LEVEL" envDefault:"DEBUG"`
+	ServerAddr      string `env:"SERVER_ADDRESS"`                  // адрес запуска HTTP-сервера (флаг -a)
+	BaseURL         string `env:"BASE_URL"`                        // базовый адрес для сокращённого URL (флаг -b)
+	MaxBodySize     int    `env:"MAX_BODY_SIZE" envDefault:"2048"` // максимальный размер тела запроса (пока не задаётся флагом)
+	IDLength        int    `env:"ID_LENGTH" envDefault:"8"`
+	LogLevel        string `env:"LOG_LEVEL" envDefault:"DEBUG"`
+	FileStoragePath string `env:"FILE_STORAGE_PATH"`
 }
 
 // GetConfig обрабатывает аргументы командной строки и переменные окружения, возвращает заполненную конфигурацию.
 func GetConfig() *Config {
 	var cfg Config
-	var flagServerAddr, flagBaseURL string
+	var flagServerAddr, flagBaseURL, flagFileStoragePath string
 
 	err := env.Parse(&cfg)
 	if err != nil {
@@ -28,6 +29,7 @@ func GetConfig() *Config {
 
 	flag.StringVar(&flagServerAddr, "a", "localhost:8080", "адрес запуска HTTP-сервера")
 	flag.StringVar(&flagBaseURL, "b", "http://localhost:8080", "базовый адрес результирующего сокращённого URL")
+	flag.StringVar(&flagFileStoragePath, "f", "storage.json", "путь к файлу-хранилищу")
 	flag.Parse()
 
 	if cfg.ServerAddr == "" {
@@ -35,6 +37,9 @@ func GetConfig() *Config {
 	}
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = flagBaseURL
+	}
+	if cfg.FileStoragePath == "" {
+		cfg.FileStoragePath = flagFileStoragePath
 	}
 
 	return &cfg

@@ -22,7 +22,11 @@ func Run() error {
 	}
 	logger.Log.Debug("Running config", zap.Any("config", cfg))
 
-	store := storage.NewStore()
+	store, err := storage.NewStore(cfg.FileStoragePath)
+	if err != nil {
+		return err
+	}
+
 	handler := handler.NewShortenerHandler(store, cfg.BaseURL, cfg.MaxBodySize, cfg.IDLength)
 
 	r := chi.NewRouter()
