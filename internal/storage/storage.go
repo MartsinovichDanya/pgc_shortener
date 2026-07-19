@@ -17,52 +17,59 @@ type Record struct {
 	OriginalURL string `json:"original_url"`
 }
 
-// Store – потокобезопасное in-memory хранилище сокращённых URL с сохранением в файл.
+// Store – потокобезопасное in-memory хранилище сокращённых URL с опциональным сохранением в файл.
 type Store struct {
 	mu       sync.RWMutex
 	data     map[string]Record // ключ – короткий идентификатор (short_url)
-	filename string
+	filename string            // если пустая строка – работа только в памяти
 }
 
-// NewStore создаёт новый экземпляр Store, загружая данные из указанного файла.
+// NewStore создаёт новый экземпляр Store.
+// Если передан путь к файлу (NewStore("data.json")), данные будут загружены из него
+// и автоматически сохраняться при каждом вызове Save.
 // Если файл не существует, он будет создан с пустым JSON-массивом.
-func NewStore(filename string) (*Store, error) {
+// Вызов без аргументов (NewStore()) создаёт хранилище только в памяти.
+func NewStore(filename ...string) (*Store, error) {
 	s := &Store{
-		data:     make(map[string]Record),
-		filename: filename,
+		data: make(map[string]Record),
 	}
 
-	file, err := os.Open(filename)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// Файла нет – создаём его с пустым массивом JSON
-			if createErr := createEmptyFile(filename); createErr != nil {
-				return nil, createErr
+	// Определяем, используется ли файловое хранилище
+	if len(filename) > 0 && filename[0] != "" {
+		s.filename = filename[0]
+
+		file, err := os.Open(s.filename)
+		if err != nil {
+			if os.IsNotExist(err) {
+				// Файла нет – создаём его с пустым массивом JSON
+				if createErr := createEmptyFile(s.filename); createErr != nil {
+					return nil, createErr
+				}
+				// Открываем только что созданный файл для чтения
+				file, err = os.Open(s.filename)
+				if err != nil {
+					return nil, fmt.Errorf("не удалось открыть свежесозданный файл хранилища: %w", err)
+				}
+			} else {
+				return nil, fmt.Errorf("не удалось открыть файл хранилища: %w", err)
 			}
-			// Открываем только что созданный файл для чтения
-			file, err = os.Open(filename)
-			if err != nil {
-				return nil, fmt.Errorf("не удалось открыть свежесозданный файл хранилища: %w", err)
+		}
+		defer file.Close()
+
+		decoder := json.NewDecoder(file)
+		var records []Record
+		if err := decoder.Decode(&records); err != nil {
+			if err == io.EOF {
+				return s, nil // пустой файл – не ошибка
 			}
-		} else {
-			return nil, fmt.Errorf("не удалось открыть файл хранилища: %w", err)
+			return nil, fmt.Errorf("ошибка чтения файла хранилища: %w", err)
+		}
+
+		for _, r := range records {
+			s.data[r.ShortURL] = r
 		}
 	}
-	defer file.Close()
 
-	decoder := json.NewDecoder(file)
-	var records []Record
-	if err := decoder.Decode(&records); err != nil {
-		// если файл пуст, то io.EOF не является ошибкой
-		if err == io.EOF {
-			return s, nil
-		}
-		return nil, fmt.Errorf("ошибка чтения файла хранилища: %w", err)
-	}
-
-	for _, r := range records {
-		s.data[r.ShortURL] = r
-	}
 	return s, nil
 }
 
@@ -74,14 +81,14 @@ func createEmptyFile(filename string) error {
 	}
 	defer file.Close()
 
-	_, err = file.WriteString("[]")
-	if err != nil {
+	if _, err := file.WriteString("[]"); err != nil {
 		return fmt.Errorf("не удалось записать пустой массив в файл: %w", err)
 	}
 	return nil
 }
 
-// Save сохраняет пару (короткий идентификатор, оригинальный URL) и записывает всё хранилище в файл.
+// Save сохраняет пару (короткий идентификатор, оригинальный URL).
+// Если хранилище файловое – данные немедленно записываются на диск.
 func (s *Store) Save(id, originalURL string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -93,9 +100,9 @@ func (s *Store) Save(id, originalURL string) {
 	}
 	s.data[id] = record
 
+	// Запись в файл только если хранилище файловое
 	if s.filename != "" {
 		if err := s.saveToFile(); err != nil {
-			// логирование ошибки (заглушка, можно заменить на log.Printf)
 			fmt.Fprintf(os.Stderr, "ошибка сохранения в файл: %v\n", err)
 		}
 	}
@@ -113,7 +120,6 @@ func (s *Store) Get(id string) (string, bool) {
 }
 
 // saveToFile записывает всё содержимое хранилища в JSON-файл.
-// Вызывается только при удерживаемой блокировке записи.
 func (s *Store) saveToFile() error {
 	records := make([]Record, 0, len(s.data))
 	for _, rec := range s.data {
@@ -127,7 +133,7 @@ func (s *Store) saveToFile() error {
 	defer file.Close()
 
 	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ") // для читаемости, соответствует примеру
+	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(records); err != nil {
 		return fmt.Errorf("ошибка записи JSON: %w", err)
 	}
@@ -140,9 +146,7 @@ func newUUID() string {
 	if _, err := rand.Read(b); err != nil {
 		panic(fmt.Sprintf("не удалось сгенерировать UUID: %v", err))
 	}
-	// устанавливаем версию 4 (биты 7-4 байта 6)
 	b[6] = (b[6] & 0x0f) | 0x40
-	// устанавливаем вариант 10 (биты 7-5 байта 8)
 	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:])

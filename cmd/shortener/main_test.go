@@ -77,7 +77,7 @@ func newTestRouter(store *storage.Store) http.Handler {
 // ---------- CreateShortLink ----------
 
 func TestCreateShortLink_ValidURL(t *testing.T) {
-	store := storage.NewStore()
+	store, _ := storage.NewStore()
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
@@ -94,7 +94,7 @@ func TestCreateShortLink_ValidURL(t *testing.T) {
 }
 
 func TestCreateShortLink_EmptyBody(t *testing.T) {
-	store := storage.NewStore()
+	store, _ := storage.NewStore()
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
@@ -105,7 +105,7 @@ func TestCreateShortLink_EmptyBody(t *testing.T) {
 }
 
 func TestCreateShortLink_InvalidURL(t *testing.T) {
-	store := storage.NewStore()
+	store, _ := storage.NewStore()
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
@@ -116,7 +116,7 @@ func TestCreateShortLink_InvalidURL(t *testing.T) {
 }
 
 func TestCreateShortLink_BodyTruncation(t *testing.T) {
-	store := storage.NewStore()
+	store, _ := storage.NewStore()
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
@@ -137,7 +137,7 @@ func TestCreateShortLink_BodyTruncation(t *testing.T) {
 // ---------- Redirect ----------
 
 func TestRedirect_ExistingID(t *testing.T) {
-	store := storage.NewStore()
+	store, _ := storage.NewStore()
 	id := "test1234"
 	originalURL := "https://example.com/redirect-target"
 	store.Save(id, originalURL)
@@ -152,7 +152,7 @@ func TestRedirect_ExistingID(t *testing.T) {
 }
 
 func TestRedirect_NonExistentID(t *testing.T) {
-	store := storage.NewStore()
+	store, _ := storage.NewStore()
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
@@ -165,7 +165,7 @@ func TestRedirect_NonExistentID(t *testing.T) {
 // ---------- Маршрутизация ----------
 
 func TestServeHTTP_InvalidMethodOnRoot(t *testing.T) {
-	store := storage.NewStore()
+	store, _ := storage.NewStore()
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
@@ -174,7 +174,7 @@ func TestServeHTTP_InvalidMethodOnRoot(t *testing.T) {
 }
 
 func TestServeHTTP_GetRootWithoutID(t *testing.T) {
-	store := storage.NewStore()
+	store, _ := storage.NewStore()
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
@@ -183,7 +183,7 @@ func TestServeHTTP_GetRootWithoutID(t *testing.T) {
 }
 
 func TestServeHTTP_PostToInvalidPath(t *testing.T) {
-	store := storage.NewStore()
+	store, _ := storage.NewStore()
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
