@@ -1,10 +1,10 @@
 package storage
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math/big"
 	"os"
 	"sync"
@@ -18,6 +18,7 @@ type Record struct {
 }
 
 // Store – потокобезопасное in-memory хранилище сокращённых URL с опциональным сохранением в файл.
+// Файл хранится в формате JSON Lines: каждая строка – отдельный JSON-объект Record.
 type Store struct {
 	mu       sync.RWMutex
 	data     map[string]Record // ключ – короткий идентификатор (short_url)
@@ -25,70 +26,50 @@ type Store struct {
 }
 
 // NewStore создаёт новый экземпляр Store.
-// Если передан путь к файлу (NewStore("data.json")), данные будут загружены из него
-// и автоматически сохраняться при каждом вызове Save.
-// Если файл не существует, он будет создан с пустым JSON-массивом.
-// Вызов без аргументов (NewStore()) создаёт хранилище только в памяти.
+// Если передан путь к файлу, данные будут загружены из него (формат JSON Lines).
+// Если файл не существует, он будет создан при первом вызове Save.
+// Вызов без аргументов создаёт хранилище только в памяти.
 func NewStore(filename ...string) (*Store, error) {
 	s := &Store{
 		data: make(map[string]Record),
 	}
 
-	// Определяем, используется ли файловое хранилище
 	if len(filename) > 0 && filename[0] != "" {
 		s.filename = filename[0]
 
 		file, err := os.Open(s.filename)
 		if err != nil {
 			if os.IsNotExist(err) {
-				// Файла нет – создаём его с пустым массивом JSON
-				if createErr := createEmptyFile(s.filename); createErr != nil {
-					return nil, createErr
-				}
-				// Открываем только что созданный файл для чтения
-				file, err = os.Open(s.filename)
-				if err != nil {
-					return nil, fmt.Errorf("не удалось открыть свежесозданный файл хранилища: %w", err)
-				}
-			} else {
-				return nil, fmt.Errorf("не удалось открыть файл хранилища: %w", err)
+				// Файла нет – это допустимо, хранилище пока пустое.
+				return s, nil
 			}
+			return nil, fmt.Errorf("не удалось открыть файл хранилища: %w", err)
 		}
 		defer file.Close()
 
-		decoder := json.NewDecoder(file)
-		var records []Record
-		if err := decoder.Decode(&records); err != nil {
-			if err == io.EOF {
-				return s, nil // пустой файл – не ошибка
+		// Читаем файл построчно, каждая строка – отдельная запись.
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" {
+				continue
 			}
-			return nil, fmt.Errorf("ошибка чтения файла хранилища: %w", err)
+			var rec Record
+			if err := json.Unmarshal([]byte(line), &rec); err != nil {
+				return nil, fmt.Errorf("ошибка разбора строки хранилища: %w", err)
+			}
+			// При дублировании short_url останется последняя запись (актуальная).
+			s.data[rec.ShortURL] = rec
 		}
-
-		for _, r := range records {
-			s.data[r.ShortURL] = r
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("ошибка чтения файла хранилища: %w", err)
 		}
 	}
 
 	return s, nil
 }
 
-// createEmptyFile создаёт файл с пустым JSON-массивом "[]".
-func createEmptyFile(filename string) error {
-	file, err := os.Create(filename)
-	if err != nil {
-		return fmt.Errorf("не удалось создать файл хранилища: %w", err)
-	}
-	defer file.Close()
-
-	if _, err := file.WriteString("[]"); err != nil {
-		return fmt.Errorf("не удалось записать пустой массив в файл: %w", err)
-	}
-	return nil
-}
-
 // Save сохраняет пару (короткий идентификатор, оригинальный URL).
-// Если хранилище файловое – данные немедленно записываются на диск.
 func (s *Store) Save(id, originalURL string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -100,9 +81,8 @@ func (s *Store) Save(id, originalURL string) {
 	}
 	s.data[id] = record
 
-	// Запись в файл только если хранилище файловое
 	if s.filename != "" {
-		if err := s.saveToFile(); err != nil {
+		if err := s.appendRecord(record); err != nil {
 			fmt.Fprintf(os.Stderr, "ошибка сохранения в файл: %v\n", err)
 		}
 	}
@@ -119,23 +99,21 @@ func (s *Store) Get(id string) (string, bool) {
 	return record.OriginalURL, true
 }
 
-// saveToFile записывает всё содержимое хранилища в JSON-файл.
-func (s *Store) saveToFile() error {
-	records := make([]Record, 0, len(s.data))
-	for _, rec := range s.data {
-		records = append(records, rec)
-	}
-
-	file, err := os.Create(s.filename)
+// appendRecord дозаписывает одну запись в конец файла.
+func (s *Store) appendRecord(rec Record) error {
+	file, err := os.OpenFile(s.filename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
 	if err != nil {
-		return fmt.Errorf("не удалось создать файл: %w", err)
+		return fmt.Errorf("не удалось открыть файл для дозаписи: %w", err)
 	}
 	defer file.Close()
 
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(records); err != nil {
-		return fmt.Errorf("ошибка записи JSON: %w", err)
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return fmt.Errorf("ошибка сериализации записи: %w", err)
+	}
+
+	if _, err := file.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("ошибка дозаписи в файл: %w", err)
 	}
 	return nil
 }

@@ -45,7 +45,6 @@ type gzipResponseWriter struct {
 
 func (g *gzipResponseWriter) WriteHeader(code int) {
 	if g.started {
-		g.ResponseWriter.WriteHeader(code)
 		return
 	}
 	g.started = true
