@@ -34,11 +34,10 @@ func main() {
 	request.Header.Add("Content-Type", "text/plain")
 	// отправляем запрос и получаем ответ
 	response, err := client.Do(request)
-	defer response.Body.Close()
-
 	if err != nil {
 		panic(err)
 	}
+	defer response.Body.Close()
 	// выводим код ответа
 	fmt.Println("Статус-код ", response.Status)
 	// читаем поток из тела ответа
