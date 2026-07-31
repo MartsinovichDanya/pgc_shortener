@@ -51,7 +51,7 @@ func Run() error {
 
 	r.Post("/", ServiceHandler.CreateShortLink)
 	r.Post("/api/shorten", ServiceHandler.ShortenAPI)
-	r.Post("/ping", ServiceHandler.PingHandler)
+	r.Get("/ping", ServiceHandler.PingHandler)
 	r.Get("/{id}", ServiceHandler.Redirect)
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
