@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,23 +16,26 @@ import (
 	"github.com/MartsinovichDanya/pgc_shortener/internal/logger"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/model"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/storage"
+	"github.com/MartsinovichDanya/pgc_shortener/internal/utils"
 )
 
 // ShortenerHandler содержит зависимости HTTP-обработчиков.
 type ShortenerHandler struct {
-	Store       *storage.Store
+	Store       storage.Store // просто интерфейс, без указателя
 	BaseURL     string
 	MaxBodySize int
 	IDLength    int
+	UseDB       bool
 }
 
 // NewShortenerHandler – конструктор обработчиков.
-func NewShortenerHandler(store *storage.Store, baseURL string, maxBodySize, idLength int) *ShortenerHandler {
+func NewShortenerHandler(store storage.Store, baseURL string, maxBodySize, idLength int, UseDB bool) *ShortenerHandler {
 	return &ShortenerHandler{
 		Store:       store,
 		BaseURL:     baseURL,
 		MaxBodySize: maxBodySize,
 		IDLength:    idLength,
+		UseDB:       UseDB,
 	}
 }
 
@@ -56,14 +60,20 @@ func (h *ShortenerHandler) CreateShortLink(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	id, err := storage.GenerateID(h.IDLength)
+	id, err := utils.GenerateID(h.IDLength)
 	if err != nil {
 		logger.Log.Debug("Ошибка генерации ID", zap.Error(err))
 		http.Error(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
 		return
 	}
 
-	h.Store.Save(id, originalURL)
+	// Теперь обрабатываем ошибку сохранения
+	if err := h.Store.Save(id, originalURL); err != nil {
+		logger.Log.Error("Ошибка сохранения URL", zap.Error(err))
+		http.Error(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
+		return
+	}
+
 	shortURL := fmt.Sprintf("%s/%s", h.BaseURL, id)
 
 	w.Header().Set("Content-Type", "text/plain")
@@ -73,7 +83,6 @@ func (h *ShortenerHandler) CreateShortLink(w http.ResponseWriter, r *http.Reques
 
 // ShortenAPI обрабатывает POST /api/shorten – создание короткой ссылки через JSON.
 func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
-	// Ограничиваем размер тела запроса
 	body, err := io.ReadAll(io.LimitReader(r.Body, int64(h.MaxBodySize)))
 	if err != nil {
 		writeJSONError(w, "Ошибка чтения запроса", http.StatusBadRequest)
@@ -81,7 +90,6 @@ func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	// Десериализуем JSON в model.Request
 	var req model.Request
 	if err := easyjson.Unmarshal(body, &req); err != nil {
 		writeJSONError(w, "Некорректный JSON", http.StatusBadRequest)
@@ -99,19 +107,20 @@ func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Генерируем уникальный идентификатор
-	id, err := storage.GenerateID(h.IDLength)
+	id, err := utils.GenerateID(h.IDLength)
 	if err != nil {
 		logger.Log.Debug("Ошибка генерации ID", zap.Error(err))
 		writeJSONError(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
 		return
 	}
 
-	// Сохраняем в хранилище
-	h.Store.Save(id, originalURL)
-	shortURL := fmt.Sprintf("%s/%s", h.BaseURL, id)
+	if err := h.Store.Save(id, originalURL); err != nil {
+		logger.Log.Error("Ошибка сохранения URL", zap.Error(err))
+		writeJSONError(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
+		return
+	}
 
-	// Формируем успешный ответ
+	shortURL := fmt.Sprintf("%s/%s", h.BaseURL, id)
 	resp := model.Response{Result: shortURL}
 	jsonResp, err := easyjson.Marshal(resp)
 	if err != nil {
@@ -127,9 +136,9 @@ func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
 // Redirect обрабатывает GET /{id} – перенаправление на оригинальный URL.
 func (h *ShortenerHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	originalURL, found := h.Store.Get(id)
-	if !found {
-		logger.Log.Debug("Идентификатор не найден", zap.String("id", id))
+	originalURL, err := h.Store.Get(id)
+	if err != nil {
+		logger.Log.Debug("Идентификатор не найден", zap.String("id", id), zap.Error(err))
 		http.Error(w, "Некорректный запрос", http.StatusBadRequest)
 		return
 	}
@@ -137,6 +146,32 @@ func (h *ShortenerHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 	logger.Log.Debug("Редирект", zap.String("id", id), zap.String("originalURL", originalURL))
 	w.Header().Set("Location", originalURL)
 	w.WriteHeader(http.StatusTemporaryRedirect)
+}
+
+func (h *ShortenerHandler) PingHandler(w http.ResponseWriter, r *http.Request) {
+	if !h.UseDB {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// При использовании БД хранилище должно поддерживать интерфейс pinger
+	type pinger interface {
+		Ping(context.Context) error
+	}
+	p, ok := h.Store.(pinger)
+	if !ok {
+		logger.Log.Error("хранилище не поддерживает Ping")
+		http.Error(w, "Ping not supported", http.StatusInternalServerError)
+		return
+	}
+
+	if err := p.Ping(r.Context()); err != nil {
+		logger.Log.Error("ошибка подключения к базе данных", zap.Error(err))
+		http.Error(w, "Database ping failed", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
 }
 
 // writeJSONError отправляет JSON-ошибку с заданным статусом.
@@ -154,5 +189,3 @@ func isValidURL(raw string) bool {
 	}
 	return parsed.Scheme == "http" || parsed.Scheme == "https"
 }
-
-// TODO:  вынести работу со ссылками в отдельную структуру в модуль service

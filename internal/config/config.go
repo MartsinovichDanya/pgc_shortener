@@ -15,12 +15,15 @@ type Config struct {
 	IDLength        int    `env:"ID_LENGTH" envDefault:"8"`
 	LogLevel        string `env:"LOG_LEVEL" envDefault:"DEBUG"`
 	FileStoragePath string `env:"FILE_STORAGE_PATH"`
+	DatabaseDSN     string `env:"DATABASE_DSN"`
+	UseDB           bool   `env:"USE_DB" envDefault:"true"`
 }
 
 // GetConfig обрабатывает аргументы командной строки и переменные окружения, возвращает заполненную конфигурацию.
 func GetConfig() *Config {
 	var cfg Config
-	var flagServerAddr, flagBaseURL, flagFileStoragePath string
+	var flagServerAddr, flagBaseURL, flagFileStoragePath,
+		flagDatabaseDSN string
 
 	err := env.Parse(&cfg)
 	if err != nil {
@@ -30,6 +33,8 @@ func GetConfig() *Config {
 	flag.StringVar(&flagServerAddr, "a", "localhost:8080", "адрес запуска HTTP-сервера")
 	flag.StringVar(&flagBaseURL, "b", "http://localhost:8080", "базовый адрес результирующего сокращённого URL")
 	flag.StringVar(&flagFileStoragePath, "f", "storage.json", "путь к файлу-хранилищу")
+	flag.StringVar(&flagDatabaseDSN, "db", "postgresql://admin:admin@localhost:5432/public", "Строка подключения в БД")
+
 	flag.Parse()
 
 	if cfg.ServerAddr == "" {
@@ -40,6 +45,9 @@ func GetConfig() *Config {
 	}
 	if cfg.FileStoragePath == "" {
 		cfg.FileStoragePath = flagFileStoragePath
+	}
+	if cfg.DatabaseDSN == "" {
+		cfg.DatabaseDSN = flagDatabaseDSN
 	}
 
 	return &cfg

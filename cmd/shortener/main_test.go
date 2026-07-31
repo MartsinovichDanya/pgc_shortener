@@ -15,12 +15,11 @@ import (
 	"github.com/MartsinovichDanya/pgc_shortener/internal/storage"
 )
 
-// TODO: покрыть тестами /api/shorten
-
 const (
 	testBaseURL     = "http://localhost:8080"
 	testMaxBodySize = 2048
 	testIDLength    = 8
+	testUseDB       = false
 )
 
 // testRequest выполняет HTTP-запрос к тестовому серверу и возвращает ответ и тело.
@@ -57,8 +56,8 @@ func getIDFromResponse(t *testing.T, body string) string {
 }
 
 // newTestRouter создаёт chi.Router с тестовыми параметрами.
-func newTestRouter(store *storage.Store) http.Handler {
-	handler := handler.NewShortenerHandler(store, testBaseURL, testMaxBodySize, testIDLength)
+func newTestRouter(store storage.Store) http.Handler {
+	handler := handler.NewShortenerHandler(store, testBaseURL, testMaxBodySize, testIDLength, testUseDB)
 
 	r := chi.NewRouter()
 	r.Post("/", handler.CreateShortLink)
@@ -77,7 +76,7 @@ func newTestRouter(store *storage.Store) http.Handler {
 // ---------- CreateShortLink ----------
 
 func TestCreateShortLink_ValidURL(t *testing.T) {
-	store, _ := storage.NewStore()
+	store, _ := storage.NewFileStore()
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
@@ -88,13 +87,13 @@ func TestCreateShortLink_ValidURL(t *testing.T) {
 	assert.Equal(t, "text/plain", resp.Header.Get("Content-Type"))
 
 	id := getIDFromResponse(t, body)
-	saved, ok := store.Get(id)
-	require.True(t, ok, "ID %s не найден в хранилище", id)
+	saved, err := store.Get(id)
+	require.NoError(t, err, "ID %s не найден в хранилище", id)
 	assert.Equal(t, originalURL, saved)
 }
 
 func TestCreateShortLink_EmptyBody(t *testing.T) {
-	store, _ := storage.NewStore()
+	store, _ := storage.NewFileStore()
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
@@ -105,7 +104,7 @@ func TestCreateShortLink_EmptyBody(t *testing.T) {
 }
 
 func TestCreateShortLink_InvalidURL(t *testing.T) {
-	store, _ := storage.NewStore()
+	store, _ := storage.NewFileStore()
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
@@ -116,7 +115,7 @@ func TestCreateShortLink_InvalidURL(t *testing.T) {
 }
 
 func TestCreateShortLink_BodyTruncation(t *testing.T) {
-	store, _ := storage.NewStore()
+	store, _ := storage.NewFileStore()
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
@@ -127,8 +126,8 @@ func TestCreateShortLink_BodyTruncation(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 
 	id := getIDFromResponse(t, body)
-	saved, ok := store.Get(id)
-	require.True(t, ok, "ID не найден в хранилище после усечения")
+	saved, err := store.Get(id)
+	require.NoError(t, err, "ID не найден в хранилище после усечения")
 
 	assert.Len(t, saved, testMaxBodySize, "длина сохранённого URL должна быть равна testMaxBodySize")
 	assert.True(t, strings.HasPrefix(longURL, saved), "сохранённый URL не является префиксом исходного")
@@ -137,10 +136,11 @@ func TestCreateShortLink_BodyTruncation(t *testing.T) {
 // ---------- Redirect ----------
 
 func TestRedirect_ExistingID(t *testing.T) {
-	store, _ := storage.NewStore()
+	store, _ := storage.NewFileStore()
 	id := "test1234"
 	originalURL := "https://example.com/redirect-target"
-	store.Save(id, originalURL)
+	err := store.Save(id, originalURL)
+	require.NoError(t, err, "ошибка сохранения тестовых данных")
 
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
@@ -152,7 +152,7 @@ func TestRedirect_ExistingID(t *testing.T) {
 }
 
 func TestRedirect_NonExistentID(t *testing.T) {
-	store, _ := storage.NewStore()
+	store, _ := storage.NewFileStore()
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
@@ -165,7 +165,7 @@ func TestRedirect_NonExistentID(t *testing.T) {
 // ---------- Маршрутизация ----------
 
 func TestServeHTTP_InvalidMethodOnRoot(t *testing.T) {
-	store, _ := storage.NewStore()
+	store, _ := storage.NewFileStore()
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
@@ -174,7 +174,7 @@ func TestServeHTTP_InvalidMethodOnRoot(t *testing.T) {
 }
 
 func TestServeHTTP_GetRootWithoutID(t *testing.T) {
-	store, _ := storage.NewStore()
+	store, _ := storage.NewFileStore()
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
@@ -183,7 +183,7 @@ func TestServeHTTP_GetRootWithoutID(t *testing.T) {
 }
 
 func TestServeHTTP_PostToInvalidPath(t *testing.T) {
-	store, _ := storage.NewStore()
+	store, _ := storage.NewFileStore()
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 

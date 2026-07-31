@@ -22,12 +22,25 @@ func Run() error {
 	}
 	logger.Log.Debug("Running config", zap.Any("config", cfg))
 
-	store, err := storage.NewStore(cfg.FileStoragePath)
+	var store storage.Store
+	var err error
+
+	if cfg.UseDB {
+		// Создаём хранилище в PostgreSQL (DSN берётся из конфига).
+		store, err = storage.NewPostgresStore(cfg.DatabaseDSN)
+	} else {
+		// Файловое/локальное хранилище.
+		store, err = storage.NewFileStore(cfg.FileStoragePath)
+	}
 	if err != nil {
+		logger.Log.Fatal("Storage creation failed", zap.Error(err))
 		return err
 	}
+	logger.Log.Debug("Storage created")
 
-	handler := handler.NewShortenerHandler(store, cfg.BaseURL, cfg.MaxBodySize, cfg.IDLength)
+	ServiceHandler := handler.NewShortenerHandler(store, cfg.BaseURL, cfg.MaxBodySize, cfg.IDLength, cfg.UseDB)
+
+	logger.Log.Debug("Handler created")
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RequestID)
@@ -36,9 +49,10 @@ func Run() error {
 	r.Use(middleware.GzipMiddleware)
 	r.Use(chiMiddleware.Recoverer)
 
-	r.Post("/", handler.CreateShortLink)
-	r.Post("/api/shorten", handler.ShortenAPI)
-	r.Get("/{id}", handler.Redirect)
+	r.Post("/", ServiceHandler.CreateShortLink)
+	r.Post("/api/shorten", ServiceHandler.ShortenAPI)
+	r.Post("/ping", ServiceHandler.PingHandler)
+	r.Get("/{id}", ServiceHandler.Redirect)
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Некорректный запрос", http.StatusBadRequest)

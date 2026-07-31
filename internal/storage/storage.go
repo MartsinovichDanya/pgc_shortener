@@ -2,12 +2,12 @@ package storage
 
 import (
 	"bufio"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"math/big"
 	"os"
 	"sync"
+
+	"github.com/MartsinovichDanya/pgc_shortener/internal/utils"
 )
 
 // Record представляет одну запись в хранилище.
@@ -17,20 +17,17 @@ type Record struct {
 	OriginalURL string `json:"original_url"`
 }
 
-// Store – потокобезопасное in-memory хранилище сокращённых URL с опциональным сохранением в файл.
-// Файл хранится в формате JSON Lines: каждая строка – отдельный JSON-объект Record.
-type Store struct {
+// FileStore – потокобезопасное in-memory хранилище сокращённых URL с сохранением в файл.
+type FileStore struct {
 	mu       sync.RWMutex
-	data     map[string]Record // ключ – короткий идентификатор (short_url)
-	filename string            // если пустая строка – работа только в памяти
+	data     map[string]Record
+	filename string
 }
 
-// NewStore создаёт новый экземпляр Store.
-// Если передан путь к файлу, данные будут загружены из него (формат JSON Lines).
-// Если файл не существует, он будет создан при первом вызове Save.
-// Вызов без аргументов создаёт хранилище только в памяти.
-func NewStore(filename ...string) (*Store, error) {
-	s := &Store{
+// NewFileStore создаёт новый экземпляр FileStore, реализующий Store.
+// Если передан путь к файлу, данные загружаются из него; иначе – только в памяти.
+func NewFileStore(filename ...string) (Store, error) { // возвращаем интерфейс
+	s := &FileStore{
 		data: make(map[string]Record),
 	}
 
@@ -40,14 +37,12 @@ func NewStore(filename ...string) (*Store, error) {
 		file, err := os.Open(s.filename)
 		if err != nil {
 			if os.IsNotExist(err) {
-				// Файла нет – это допустимо, хранилище пока пустое.
 				return s, nil
 			}
 			return nil, fmt.Errorf("не удалось открыть файл хранилища: %w", err)
 		}
 		defer file.Close()
 
-		// Читаем файл построчно, каждая строка – отдельная запись.
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -58,7 +53,6 @@ func NewStore(filename ...string) (*Store, error) {
 			if err := json.Unmarshal([]byte(line), &rec); err != nil {
 				return nil, fmt.Errorf("ошибка разбора строки хранилища: %w", err)
 			}
-			// При дублировании short_url останется последняя запись (актуальная).
 			s.data[rec.ShortURL] = rec
 		}
 		if err := scanner.Err(); err != nil {
@@ -70,12 +64,13 @@ func NewStore(filename ...string) (*Store, error) {
 }
 
 // Save сохраняет пару (короткий идентификатор, оригинальный URL).
-func (s *Store) Save(id, originalURL string) {
+// Возвращает ошибку, если не удалось записать в файл.
+func (s *FileStore) Save(id, originalURL string) error { // приёмник *FileStore
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	record := Record{
-		UUID:        newUUID(),
+		UUID:        utils.NewUUID(), // убедитесь, что функция newUUID определена
 		ShortURL:    id,
 		OriginalURL: originalURL,
 	}
@@ -83,24 +78,26 @@ func (s *Store) Save(id, originalURL string) {
 
 	if s.filename != "" {
 		if err := s.appendRecord(record); err != nil {
-			fmt.Fprintf(os.Stderr, "ошибка сохранения в файл: %v\n", err)
+			return fmt.Errorf("ошибка сохранения в файл: %w", err) // возвращаем ошибку
 		}
 	}
+	return nil
 }
 
-// Get возвращает оригинальный URL по идентификатору. Второе значение – флаг наличия.
-func (s *Store) Get(id string) (string, bool) {
+// Get возвращает оригинальный URL по идентификатору.
+// Если id не найден, вторым значением возвращается false.
+func (s *FileStore) Get(id string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	record, ok := s.data[id]
 	if !ok {
-		return "", false
+		return "", fmt.Errorf("идентификатор %s не найден", id)
 	}
-	return record.OriginalURL, true
+	return record.OriginalURL, nil
 }
 
-// appendRecord дозаписывает одну запись в конец файла.
-func (s *Store) appendRecord(rec Record) error {
+// appendRecord дописывает запись в конец файла.
+func (s *FileStore) appendRecord(rec Record) error {
 	file, err := os.OpenFile(s.filename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
 	if err != nil {
 		return fmt.Errorf("не удалось открыть файл для дозаписи: %w", err)
@@ -116,32 +113,4 @@ func (s *Store) appendRecord(rec Record) error {
 		return fmt.Errorf("ошибка дозаписи в файл: %w", err)
 	}
 	return nil
-}
-
-// newUUID генерирует UUID версии 4.
-func newUUID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Sprintf("не удалось сгенерировать UUID: %v", err))
-	}
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-		b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
-}
-
-// base62Chars – алфавит для генерации коротких идентификаторов.
-var base62Chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-
-// GenerateID создаёт криптографически случайный идентификатор заданной длины.
-func GenerateID(length int) (string, error) {
-	id := make([]byte, length)
-	for i := range id {
-		idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(base62Chars))))
-		if err != nil {
-			return "", fmt.Errorf("ошибка генерации случайного числа: %w", err)
-		}
-		id[i] = base62Chars[idx.Int64()]
-	}
-	return string(id), nil
 }
