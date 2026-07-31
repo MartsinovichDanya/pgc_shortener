@@ -33,7 +33,7 @@ func GetConfig() *Config {
 	flag.StringVar(&flagServerAddr, "a", "localhost:8080", "адрес запуска HTTP-сервера")
 	flag.StringVar(&flagBaseURL, "b", "http://localhost:8080", "базовый адрес результирующего сокращённого URL")
 	flag.StringVar(&flagFileStoragePath, "f", "storage.json", "путь к файлу-хранилищу")
-	flag.StringVar(&flagDatabaseDSN, "db", "postgresql://admin:admin@localhost:5432/public", "Строка подключения в БД")
+	flag.StringVar(&flagDatabaseDSN, "d", "postgresql://admin:admin@localhost:5432/public", "Строка подключения в БД")
 
 	flag.Parse()
 
