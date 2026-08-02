@@ -2,48 +2,59 @@ package storage
 
 import (
 	"context"
+	"database/sql"
+	"embed"
 	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
 
 	"github.com/MartsinovichDanya/pgc_shortener/internal/utils"
 )
 
-// PostgresStore реализует интерфейс Store для работы с PostgreSQL.
+//go:embed migrations/*.sql
+var migrationsFS embed.FS
+
 type PostgresStore struct {
 	pool *pgxpool.Pool
 }
 
-// NewPostgresStore создаёт новое хранилище, работающее с PostgreSQL.
-// Принимает строку подключения (например, "postgres://user:pass@localhost/dbname").
-// Автоматически создаёт таблицу urls, если она ещё не существует.
 func NewPostgresStore(databaseURL string) (Store, error) {
 	pool, err := pgxpool.New(context.Background(), databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("не удалось создать пул подключений к PostgreSQL: %w", err)
+		return nil, fmt.Errorf("не удалось создать пул подключений: %w", err)
 	}
 
-	// Создаём таблицу, если её нет
-	createTableSQL := `
-        CREATE TABLE IF NOT EXISTS service_data.urls (
-            uuid         UUID PRIMARY KEY,
-            short_url    TEXT NOT NULL UNIQUE,
-            original_url TEXT NOT NULL
-        );
-    `
-	if _, err := pool.Exec(context.Background(), createTableSQL); err != nil {
+	if err := runMigrations(databaseURL); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("не удалось создать таблицу urls: %w", err)
+		return nil, fmt.Errorf("не удалось применить миграции: %w", err)
 	}
 
 	return &PostgresStore{pool: pool}, nil
 }
 
-// Save сохраняет пару (короткий идентификатор, оригинальный URL).
-// Если запись с таким short_url уже существует, её original_url и uuid обновляются.
-// Возвращает ошибку в случае проблем с базой данных.
+// runMigrations применяет SQL-миграции через goose.
+func runMigrations(databaseURL string) error {
+	// Открываем соединение через database/sql с драйвером pgx
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return fmt.Errorf("sql.Open: %w", err)
+	}
+	defer db.Close()
+
+	// Указываем goose использовать встроенную файловую систему
+	goose.SetBaseFS(migrationsFS)
+
+	// Накатываем все up-миграции
+	if err := goose.Up(db, "migrations"); err != nil {
+		return fmt.Errorf("goose.Up: %w", err)
+	}
+	return nil
+}
+
 func (s *PostgresStore) Save(id, originalURL string) error {
 	uuid := utils.NewUUID()
 	query := `
@@ -55,13 +66,11 @@ func (s *PostgresStore) Save(id, originalURL string) error {
     `
 	_, err := s.pool.Exec(context.Background(), query, uuid, id, originalURL)
 	if err != nil {
-		return fmt.Errorf("ошибка сохранения в postgres: %w", err)
+		return fmt.Errorf("ошибка сохранения: %w", err)
 	}
 	return nil
 }
 
-// Get возвращает оригинальный URL по короткому идентификатору.
-// Если запись не найдена, возвращает ошибку, которую можно проверить через errors.Is(err, pgx.ErrNoRows).
 func (s *PostgresStore) Get(id string) (string, error) {
 	var originalURL string
 	err := s.pool.QueryRow(context.Background(),
@@ -72,17 +81,15 @@ func (s *PostgresStore) Get(id string) (string, error) {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", fmt.Errorf("url с идентификатором %s не найден: %w", id, err)
 		}
-		return "", fmt.Errorf("ошибка получения из postgres: %w", err)
+		return "", fmt.Errorf("ошибка получения: %w", err)
 	}
 	return originalURL, nil
 }
 
-// Ping проверяет доступность базы данных. (опционально)
 func (s *PostgresStore) Ping(ctx context.Context) error {
 	return s.pool.Ping(ctx)
 }
 
-// Close освобождает пул соединений с базой данных. (опционально)
 func (s *PostgresStore) Close() {
 	s.pool.Close()
 }
