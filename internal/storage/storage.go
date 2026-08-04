@@ -26,7 +26,7 @@ type FileStore struct {
 
 // NewFileStore создаёт новый экземпляр FileStore, реализующий Store.
 // Если передан путь к файлу, данные загружаются из него; иначе – только в памяти.
-func NewFileStore(filename ...string) (Store, error) { // возвращаем интерфейс
+func NewFileStore(filename ...string) (Store, error) {
 	s := &FileStore{
 		data: make(map[string]Record),
 	}
@@ -64,13 +64,12 @@ func NewFileStore(filename ...string) (Store, error) { // возвращаем �
 }
 
 // Save сохраняет пару (короткий идентификатор, оригинальный URL).
-// Возвращает ошибку, если не удалось записать в файл.
-func (s *FileStore) Save(id, originalURL string) error { // приёмник *FileStore
+func (s *FileStore) Save(id, originalURL string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	record := Record{
-		UUID:        utils.NewUUID(), // убедитесь, что функция newUUID определена
+		UUID:        utils.NewUUID(),
 		ShortURL:    id,
 		OriginalURL: originalURL,
 	}
@@ -78,14 +77,53 @@ func (s *FileStore) Save(id, originalURL string) error { // приёмник *Fi
 
 	if s.filename != "" {
 		if err := s.appendRecord(record); err != nil {
-			return fmt.Errorf("ошибка сохранения в файл: %w", err) // возвращаем ошибку
+			return fmt.Errorf("ошибка сохранения в файл: %w", err)
 		}
 	}
 	return nil
 }
 
+// SaveBatch сохраняет множество пар (id, originalURL) за одну операцию.
+// Все записи попадают в память и файл (если задан) с одной блокировкой.
+func (s *FileStore) SaveBatch(records map[string]string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Собираем все новые записи
+	newRecords := make([]Record, 0, len(records))
+	for id, originalURL := range records {
+		rec := Record{
+			UUID:        utils.NewUUID(),
+			ShortURL:    id,
+			OriginalURL: originalURL,
+		}
+		s.data[id] = rec
+		newRecords = append(newRecords, rec)
+	}
+
+	// Пишем в файл, если путь задан
+	if s.filename != "" {
+		file, err := os.OpenFile(s.filename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
+		if err != nil {
+			return fmt.Errorf("не удалось открыть файл для пакетной записи: %w", err)
+		}
+		defer file.Close()
+
+		for _, rec := range newRecords {
+			data, err := json.Marshal(rec)
+			if err != nil {
+				return fmt.Errorf("ошибка сериализации записи: %w", err)
+			}
+			if _, err := file.Write(append(data, '\n')); err != nil {
+				return fmt.Errorf("ошибка записи в файл: %w", err)
+			}
+		}
+	}
+
+	return nil
+}
+
 // Get возвращает оригинальный URL по идентификатору.
-// Если id не найден, вторым значением возвращается false.
 func (s *FileStore) Get(id string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

@@ -36,19 +36,15 @@ func NewPostgresStore(databaseURL string) (Store, error) {
 	return &PostgresStore{pool: pool}, nil
 }
 
-// runMigrations применяет SQL-миграции через goose.
 func runMigrations(databaseURL string) error {
-	// Открываем соединение через database/sql с драйвером pgx
 	db, err := sql.Open("pgx", databaseURL)
 	if err != nil {
 		return fmt.Errorf("sql.Open: %w", err)
 	}
 	defer db.Close()
 
-	// Указываем goose использовать встроенную файловую систему
 	goose.SetBaseFS(migrationsFS)
 
-	// Накатываем все up-миграции
 	if err := goose.Up(db, "migrations"); err != nil {
 		return fmt.Errorf("goose.Up: %w", err)
 	}
@@ -67,6 +63,35 @@ func (s *PostgresStore) Save(id, originalURL string) error {
 	_, err := s.pool.Exec(context.Background(), query, uuid, id, originalURL)
 	if err != nil {
 		return fmt.Errorf("ошибка сохранения: %w", err)
+	}
+	return nil
+}
+
+// SaveBatch сохраняет множество пар (id, originalURL) в одной транзакции.
+func (s *PostgresStore) SaveBatch(records map[string]string) error {
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("не удалось начать транзакцию: %w", err)
+	}
+	defer tx.Rollback(ctx) // откат в случае ошибки или паники
+
+	query := `
+        INSERT INTO service_data.urls (uuid, short_url, original_url)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (short_url) DO UPDATE
+            SET original_url = EXCLUDED.original_url,
+                uuid         = EXCLUDED.uuid;
+    `
+	for id, originalURL := range records {
+		uuid := utils.NewUUID()
+		if _, err := tx.Exec(ctx, query, uuid, id, originalURL); err != nil {
+			return fmt.Errorf("ошибка вставки для %s: %w", id, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("ошибка коммита транзакции: %w", err)
 	}
 	return nil
 }

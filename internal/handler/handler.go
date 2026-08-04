@@ -174,6 +174,88 @@ func (h *ShortenerHandler) PingHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func (h *ShortenerHandler) ShortenBatch(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, int64(h.MaxBodySize)))
+	if err != nil {
+		writeJSONError(w, "Ошибка чтения тела", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	var items []model.BatchRequestItem
+	if err := json.Unmarshal(body, &items); err != nil {
+		writeJSONError(w, "Некорректный JSON", http.StatusBadRequest)
+		return
+	}
+
+	if len(items) == 0 {
+		writeJSONError(w, "Пустой список URL", http.StatusBadRequest)
+		return
+	}
+
+	// Промежуточная структура для связи correlation_id со сгенерированным ID
+	type corrToID struct {
+		correlationID string
+		shortID       string
+	}
+	corrList := make([]corrToID, 0, len(items))
+	records := make(map[string]string, len(items)) // shortID -> originalURL
+
+	for _, item := range items {
+		// Валидация correlation_id
+		cid := strings.TrimSpace(item.CorrelationID)
+		if cid == "" {
+			writeJSONError(w, "correlation_id не может быть пустым", http.StatusBadRequest)
+			return
+		}
+
+		// Валидация original_url
+		origURL := strings.TrimSpace(item.OriginalURL)
+		if origURL == "" {
+			writeJSONError(w, "original_url не может быть пустым", http.StatusBadRequest)
+			return
+		}
+		if !isValidURL(origURL) {
+			writeJSONError(w, fmt.Sprintf("Некорректный URL: %s", origURL), http.StatusBadRequest)
+			return
+		}
+
+		// Генерация короткого идентификатора
+		id, err := utils.GenerateID(h.IDLength)
+		if err != nil {
+			logger.Log.Debug("Ошибка генерации ID", zap.Error(err))
+			writeJSONError(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
+			return
+		}
+
+		records[id] = origURL
+		corrList = append(corrList, corrToID{correlationID: cid, shortID: id})
+	}
+
+	// Атомарная пакетная вставка
+	if err := h.Store.SaveBatch(records); err != nil {
+		logger.Log.Error("Ошибка пакетного сохранения", zap.Error(err))
+		writeJSONError(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
+		return
+	}
+
+	// Формируем ответ
+	resp := make([]model.BatchResponseItem, 0, len(corrList))
+	for _, c := range corrList {
+		shortURL := fmt.Sprintf("%s/%s", h.BaseURL, c.shortID)
+		resp = append(resp, model.BatchResponseItem{
+			CorrelationID: c.correlationID,
+			ShortURL:      shortURL,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		logger.Log.Debug("Ошибка записи ответа", zap.Error(err))
+	}
+}
+
 // writeJSONError отправляет JSON-ошибку с заданным статусом.
 func writeJSONError(w http.ResponseWriter, message string, code int) {
 	w.Header().Set("Content-Type", "application/json")
