@@ -68,6 +68,13 @@ func (s *FileStore) Save(id, originalURL string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Проверяем, нет ли уже такого original_url
+	for _, rec := range s.data {
+		if rec.OriginalURL == originalURL {
+			return ErrURLExists
+		}
+	}
+
 	record := Record{
 		UUID:        utils.NewUUID(),
 		ShortURL:    id,
@@ -132,6 +139,17 @@ func (s *FileStore) Get(id string) (string, error) {
 		return "", fmt.Errorf("идентификатор %s не найден", id)
 	}
 	return record.OriginalURL, nil
+}
+
+func (s *FileStore) GetByOriginalURL(originalURL string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, rec := range s.data {
+		if rec.OriginalURL == originalURL {
+			return rec.ShortURL, nil
+		}
+	}
+	return "", fmt.Errorf("original URL не найден")
 }
 
 // appendRecord дописывает запись в конец файла.

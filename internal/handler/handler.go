@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -67,8 +68,21 @@ func (h *ShortenerHandler) CreateShortLink(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Теперь обрабатываем ошибку сохранения
 	if err := h.Store.Save(id, originalURL); err != nil {
+		if errors.Is(err, storage.ErrURLExists) {
+			existingShort, errGet := h.Store.GetByOriginalURL(originalURL)
+			if errGet != nil {
+				logger.Log.Error("Ошибка получения существующего URL", zap.Error(errGet))
+				http.Error(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
+				return
+			}
+			// Формируем полный сокращённый URL
+			fullShortURL := fmt.Sprintf("%s/%s", h.BaseURL, existingShort)
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprint(w, fullShortURL)
+			return
+		}
 		logger.Log.Error("Ошибка сохранения URL", zap.Error(err))
 		http.Error(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
 		return
@@ -115,6 +129,26 @@ func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.Store.Save(id, originalURL); err != nil {
+		if errors.Is(err, storage.ErrURLExists) {
+			existingShort, errGet := h.Store.GetByOriginalURL(originalURL)
+			if errGet != nil {
+				logger.Log.Error("Ошибка получения существующего URL", zap.Error(errGet))
+				writeJSONError(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
+				return
+			}
+			fullShortURL := fmt.Sprintf("%s/%s", h.BaseURL, existingShort)
+			resp := model.Response{Result: fullShortURL}
+			jsonResp, errMarshal := easyjson.Marshal(resp)
+			if errMarshal != nil {
+				writeJSONError(w, "Ошибка формирования ответа", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write(jsonResp)
+			return
+		}
+
 		logger.Log.Error("Ошибка сохранения URL", zap.Error(err))
 		writeJSONError(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
 		return

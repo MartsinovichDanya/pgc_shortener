@@ -56,13 +56,14 @@ func (s *PostgresStore) Save(id, originalURL string) error {
 	query := `
         INSERT INTO service_data.urls (uuid, short_url, original_url)
         VALUES ($1, $2, $3)
-        ON CONFLICT (short_url) DO UPDATE
-            SET original_url = EXCLUDED.original_url,
-                uuid         = EXCLUDED.uuid;
+        ON CONFLICT (original_url) DO NOTHING;
     `
-	_, err := s.pool.Exec(context.Background(), query, uuid, id, originalURL)
+	tag, err := s.pool.Exec(context.Background(), query, uuid, id, originalURL)
 	if err != nil {
 		return fmt.Errorf("ошибка сохранения: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrURLExists
 	}
 	return nil
 }
@@ -109,6 +110,20 @@ func (s *PostgresStore) Get(id string) (string, error) {
 		return "", fmt.Errorf("ошибка получения: %w", err)
 	}
 	return originalURL, nil
+}
+
+func (s *PostgresStore) GetByOriginalURL(originalURL string) (string, error) {
+	var shortURL string
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT short_url FROM service_data.urls WHERE original_url = $1`, originalURL,
+	).Scan(&shortURL)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("original URL не найден: %w", err)
+		}
+		return "", fmt.Errorf("ошибка получения short URL: %w", err)
+	}
+	return shortURL, nil
 }
 
 func (s *PostgresStore) Ping(ctx context.Context) error {
