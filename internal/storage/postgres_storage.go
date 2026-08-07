@@ -78,12 +78,10 @@ func (s *PostgresStore) SaveBatch(records map[string]string) error {
 	defer tx.Rollback(ctx) // откат в случае ошибки или паники
 
 	query := `
-        INSERT INTO service_data.urls (uuid, short_url, original_url)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (short_url) DO UPDATE
-            SET original_url = EXCLUDED.original_url,
-                uuid         = EXCLUDED.uuid;
-    `
+		INSERT INTO service_data.urls (uuid, short_url, original_url)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (original_url) DO NOTHING;
+	`
 	for id, originalURL := range records {
 		uuid := utils.NewUUID()
 		if _, err := tx.Exec(ctx, query, uuid, id, originalURL); err != nil {
