@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 
+	"github.com/MartsinovichDanya/pgc_shortener/internal/auth"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/config"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/handler"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/logger"
@@ -46,12 +47,14 @@ func Run() error {
 	r.Use(chiMiddleware.RequestID)
 	//r.Use(middleware.RealIP)
 	r.Use(logger.GetLogger())
+	r.Use(auth.AuthMiddleware(cfg.CookieSecret))
 	r.Use(middleware.GzipMiddleware)
 	r.Use(chiMiddleware.Recoverer)
 
 	r.Post("/", ServiceHandler.CreateShortLink)
 	r.Post("/api/shorten", ServiceHandler.ShortenAPI)
 	r.Post("/api/shorten/batch", ServiceHandler.ShortenBatch)
+	r.Get("/api/user/urls", ServiceHandler.UserURLs)
 	r.Get("/ping", ServiceHandler.PingHandler)
 	r.Get("/{id}", ServiceHandler.Redirect)
 

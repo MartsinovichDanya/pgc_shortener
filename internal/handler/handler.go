@@ -14,6 +14,7 @@ import (
 	"github.com/mailru/easyjson"
 	"go.uber.org/zap"
 
+	"github.com/MartsinovichDanya/pgc_shortener/internal/auth"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/logger"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/model"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/storage"
@@ -22,7 +23,7 @@ import (
 
 // ShortenerHandler содержит зависимости HTTP-обработчиков.
 type ShortenerHandler struct {
-	Store       storage.Store // просто интерфейс, без указателя
+	Store       storage.Store // интерфейс изменён: Save и SaveBatch теперь принимают userID
 	BaseURL     string
 	MaxBodySize int
 	IDLength    int
@@ -68,7 +69,11 @@ func (h *ShortenerHandler) CreateShortLink(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if err := h.Store.Save(id, originalURL); err != nil {
+	// Извлекаем userID из контекста (установлен middleware)
+	userID, _ := r.Context().Value(auth.UserIDKey).(string)
+
+	// Сохраняем с привязкой к пользователю
+	if err := h.Store.Save(id, originalURL, userID); err != nil {
 		if errors.Is(err, storage.ErrURLExists) {
 			existingShort, errGet := h.Store.GetByOriginalURL(originalURL)
 			if errGet != nil {
@@ -76,7 +81,6 @@ func (h *ShortenerHandler) CreateShortLink(w http.ResponseWriter, r *http.Reques
 				http.Error(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
 				return
 			}
-			// Формируем полный сокращённый URL
 			fullShortURL := fmt.Sprintf("%s/%s", h.BaseURL, existingShort)
 			w.Header().Set("Content-Type", "text/plain")
 			w.WriteHeader(http.StatusConflict)
@@ -128,7 +132,10 @@ func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.Store.Save(id, originalURL); err != nil {
+	// Получаем userID из контекста
+	userID, _ := r.Context().Value(auth.UserIDKey).(string)
+
+	if err := h.Store.Save(id, originalURL, userID); err != nil {
 		if errors.Is(err, storage.ErrURLExists) {
 			existingShort, errGet := h.Store.GetByOriginalURL(originalURL)
 			if errGet != nil {
@@ -188,7 +195,6 @@ func (h *ShortenerHandler) PingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// При использовании БД хранилище должно поддерживать интерфейс pinger
 	type pinger interface {
 		Ping(context.Context) error
 	}
@@ -227,23 +233,20 @@ func (h *ShortenerHandler) ShortenBatch(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Промежуточная структура для связи correlation_id со сгенерированным ID
 	type corrToID struct {
 		correlationID string
 		shortID       string
 	}
 	corrList := make([]corrToID, 0, len(items))
-	records := make(map[string]string, len(items)) // shortID -> originalURL
+	records := make(map[string]string, len(items))
 
 	for _, item := range items {
-		// Валидация correlation_id
 		cid := strings.TrimSpace(item.CorrelationID)
 		if cid == "" {
 			writeJSONError(w, "correlation_id не может быть пустым", http.StatusBadRequest)
 			return
 		}
 
-		// Валидация original_url
 		origURL := strings.TrimSpace(item.OriginalURL)
 		if origURL == "" {
 			writeJSONError(w, "original_url не может быть пустым", http.StatusBadRequest)
@@ -254,7 +257,6 @@ func (h *ShortenerHandler) ShortenBatch(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
-		// Генерация короткого идентификатора
 		id, err := utils.GenerateID(h.IDLength)
 		if err != nil {
 			logger.Log.Debug("Ошибка генерации ID", zap.Error(err))
@@ -266,14 +268,16 @@ func (h *ShortenerHandler) ShortenBatch(w http.ResponseWriter, r *http.Request) 
 		corrList = append(corrList, corrToID{correlationID: cid, shortID: id})
 	}
 
+	// Получаем userID для привязки всех ссылок
+	userID, _ := r.Context().Value(auth.UserIDKey).(string)
+
 	// Атомарная пакетная вставка
-	if err := h.Store.SaveBatch(records); err != nil {
+	if err := h.Store.SaveBatch(records, userID); err != nil {
 		logger.Log.Error("Ошибка пакетного сохранения", zap.Error(err))
 		writeJSONError(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
 		return
 	}
 
-	// Формируем ответ
 	resp := make([]model.BatchResponseItem, 0, len(corrList))
 	for _, c := range corrList {
 		shortURL := fmt.Sprintf("%s/%s", h.BaseURL, c.shortID)
@@ -287,6 +291,41 @@ func (h *ShortenerHandler) ShortenBatch(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusCreated)
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		logger.Log.Debug("Ошибка записи ответа", zap.Error(err))
+	}
+}
+
+// UserURLs обрабатывает GET /api/user/urls – возвращает все ссылки пользователя.
+func (h *ShortenerHandler) UserURLs(w http.ResponseWriter, r *http.Request) {
+	// Если при проверке куки был обнаружен невалидный токен – 401
+	if invalid, ok := r.Context().Value(auth.TokenInvalidKey).(bool); ok && invalid {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "user token is invalid"})
+		return
+	}
+
+	userID, ok := r.Context().Value(auth.UserIDKey).(string)
+	if !ok || userID == "" {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	urls, err := h.Store.GetUserURLs(userID)
+	if err != nil {
+		logger.Log.Error("Ошибка получения URL пользователя", zap.Error(err))
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	if len(urls) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(urls); err != nil {
+		logger.Log.Debug("Ошибка сериализации ответа", zap.Error(err))
 	}
 }
 

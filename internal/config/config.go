@@ -16,6 +16,7 @@ type Config struct {
 	LogLevel        string `env:"LOG_LEVEL" envDefault:"DEBUG"`
 	FileStoragePath string `env:"FILE_STORAGE_PATH"`
 	DatabaseDSN     string `env:"DATABASE_DSN"`
+	CookieSecret    string `env:"COOKIE_SECRET" envDefault:"secret123"`
 	UseDB           bool
 }
 

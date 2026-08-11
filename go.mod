@@ -5,7 +5,9 @@ go 1.26.4
 require (
 	github.com/caarlos0/env/v6 v6.10.1
 	github.com/go-chi/chi/v5 v5.3.1
+	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/joho/godotenv v1.5.1
 	github.com/mailru/easyjson v0.9.2
 	github.com/pressly/goose/v3 v3.27.3
 	github.com/stretchr/testify v1.11.1

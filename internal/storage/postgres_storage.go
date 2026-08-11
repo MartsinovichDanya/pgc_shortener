@@ -12,6 +12,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
+	"github.com/MartsinovichDanya/pgc_shortener/internal/model"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/utils"
 )
 
@@ -51,14 +52,15 @@ func runMigrations(databaseURL string) error {
 	return nil
 }
 
-func (s *PostgresStore) Save(id, originalURL string) error {
+// Save сохраняет короткую ссылку с привязкой к пользователю.
+func (s *PostgresStore) Save(id, originalURL, userID string) error {
 	uuid := utils.NewUUID()
 	query := `
-        INSERT INTO service_data.urls (uuid, short_url, original_url)
-        VALUES ($1, $2, $3)
+        INSERT INTO service_data.urls (uuid, short_url, original_url, user_id)
+        VALUES ($1, $2, $3, $4)
         ON CONFLICT (original_url) DO NOTHING;
     `
-	tag, err := s.pool.Exec(context.Background(), query, uuid, id, originalURL)
+	tag, err := s.pool.Exec(context.Background(), query, uuid, id, originalURL, userID)
 	if err != nil {
 		return fmt.Errorf("ошибка сохранения: %w", err)
 	}
@@ -68,23 +70,23 @@ func (s *PostgresStore) Save(id, originalURL string) error {
 	return nil
 }
 
-// SaveBatch сохраняет множество пар (id, originalURL) в одной транзакции.
-func (s *PostgresStore) SaveBatch(records map[string]string) error {
+// SaveBatch сохраняет множество ссылок в одной транзакции с привязкой к пользователю.
+func (s *PostgresStore) SaveBatch(records map[string]string, userID string) error {
 	ctx := context.Background()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("не удалось начать транзакцию: %w", err)
 	}
-	defer tx.Rollback(ctx) // откат в случае ошибки или паники
+	defer tx.Rollback(ctx)
 
 	query := `
-		INSERT INTO service_data.urls (uuid, short_url, original_url)
-		VALUES ($1, $2, $3)
+		INSERT INTO service_data.urls (uuid, short_url, original_url, user_id)
+		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (original_url) DO NOTHING;
 	`
 	for id, originalURL := range records {
 		uuid := utils.NewUUID()
-		if _, err := tx.Exec(ctx, query, uuid, id, originalURL); err != nil {
+		if _, err := tx.Exec(ctx, query, uuid, id, originalURL, userID); err != nil {
 			return fmt.Errorf("ошибка вставки для %s: %w", id, err)
 		}
 	}
@@ -95,6 +97,7 @@ func (s *PostgresStore) SaveBatch(records map[string]string) error {
 	return nil
 }
 
+// Get возвращает оригинальный URL по сокращённому идентификатору.
 func (s *PostgresStore) Get(id string) (string, error) {
 	var originalURL string
 	err := s.pool.QueryRow(context.Background(),
@@ -110,6 +113,7 @@ func (s *PostgresStore) Get(id string) (string, error) {
 	return originalURL, nil
 }
 
+// GetByOriginalURL возвращает короткий идентификатор по оригинальному URL.
 func (s *PostgresStore) GetByOriginalURL(originalURL string) (string, error) {
 	var shortURL string
 	err := s.pool.QueryRow(context.Background(),
@@ -124,10 +128,41 @@ func (s *PostgresStore) GetByOriginalURL(originalURL string) (string, error) {
 	return shortURL, nil
 }
 
+// GetUserURLs возвращает все когда-либо сокращённые пользователем ссылки.
+func (s *PostgresStore) GetUserURLs(userID string) ([]model.UserURL, error) {
+	rows, err := s.pool.Query(context.Background(),
+		`SELECT short_url, original_url FROM service_data.urls WHERE user_id = $1`,
+		userID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка получения URL пользователя: %w", err)
+	}
+	defer rows.Close()
+
+	var urls []model.UserURL
+	for rows.Next() {
+		var shortID, origURL string
+		if err := rows.Scan(&shortID, &origURL); err != nil {
+			return nil, fmt.Errorf("ошибка чтения строки: %w", err)
+		}
+		urls = append(urls, model.UserURL{
+			ShortURL:    shortID, // идентификатор без базового URL
+			OriginalURL: origURL,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ошибка итерации: %w", err)
+	}
+
+	return urls, nil
+}
+
+// Ping проверяет доступность базы данных.
 func (s *PostgresStore) Ping(ctx context.Context) error {
 	return s.pool.Ping(ctx)
 }
 
+// Close закрывает пул соединений.
 func (s *PostgresStore) Close() {
 	s.pool.Close()
 }

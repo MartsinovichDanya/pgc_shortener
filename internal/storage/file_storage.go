@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/MartsinovichDanya/pgc_shortener/internal/model"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/utils"
 )
 
@@ -15,6 +16,7 @@ type Record struct {
 	UUID        string `json:"uuid"`
 	ShortURL    string `json:"short_url"`
 	OriginalURL string `json:"original_url"`
+	UserID      string `json:"user_id"`
 }
 
 // FileStore – потокобезопасное in-memory хранилище сокращённых URL с сохранением в файл.
@@ -63,8 +65,8 @@ func NewFileStore(filename ...string) (Store, error) {
 	return s, nil
 }
 
-// Save сохраняет пару (короткий идентификатор, оригинальный URL).
-func (s *FileStore) Save(id, originalURL string) error {
+// Save сохраняет пару (короткий идентификатор, оригинальный URL) для пользователя userID.
+func (s *FileStore) Save(id, originalURL, userID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -79,6 +81,7 @@ func (s *FileStore) Save(id, originalURL string) error {
 		UUID:        utils.NewUUID(),
 		ShortURL:    id,
 		OriginalURL: originalURL,
+		UserID:      userID,
 	}
 	s.data[id] = record
 
@@ -90,9 +93,8 @@ func (s *FileStore) Save(id, originalURL string) error {
 	return nil
 }
 
-// SaveBatch сохраняет множество пар (id, originalURL) за одну операцию.
-// Все записи попадают в память и файл (если задан) с одной блокировкой.
-func (s *FileStore) SaveBatch(records map[string]string) error {
+// SaveBatch сохраняет множество пар (id, originalURL) за одну операцию для пользователя userID.
+func (s *FileStore) SaveBatch(records map[string]string, userID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -103,6 +105,7 @@ func (s *FileStore) SaveBatch(records map[string]string) error {
 			UUID:        utils.NewUUID(),
 			ShortURL:    id,
 			OriginalURL: originalURL,
+			UserID:      userID,
 		}
 		s.data[id] = rec
 		newRecords = append(newRecords, rec)
@@ -141,6 +144,7 @@ func (s *FileStore) Get(id string) (string, error) {
 	return record.OriginalURL, nil
 }
 
+// GetByOriginalURL возвращает короткий идентификатор по оригинальному URL.
 func (s *FileStore) GetByOriginalURL(originalURL string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -150,6 +154,23 @@ func (s *FileStore) GetByOriginalURL(originalURL string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("original URL не найден")
+}
+
+// GetUserURLs возвращает все сокращённые пользователем ссылки в виде model.UserURL.
+func (s *FileStore) GetUserURLs(userID string) ([]model.UserURL, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result []model.UserURL
+	for _, rec := range s.data {
+		if rec.UserID == userID {
+			result = append(result, model.UserURL{
+				ShortURL:    rec.ShortURL, // только идентификатор; полный URL соберётся в хендлере
+				OriginalURL: rec.OriginalURL,
+			})
+		}
+	}
+	return result, nil
 }
 
 // appendRecord дописывает запись в конец файла.
