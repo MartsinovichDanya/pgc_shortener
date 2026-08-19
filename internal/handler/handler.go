@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mailru/easyjson"
@@ -179,6 +180,10 @@ func (h *ShortenerHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	originalURL, err := h.Store.Get(id)
 	if err != nil {
+		if errors.Is(err, storage.ErrURLDeleted) {
+			http.Error(w, "Gone", http.StatusGone)
+			return
+		}
 		logger.Log.Debug("Идентификатор не найден", zap.String("id", id), zap.Error(err))
 		http.Error(w, "Некорректный запрос", http.StatusBadRequest)
 		return
@@ -330,6 +335,85 @@ func (h *ShortenerHandler) UserURLs(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(urls); err != nil {
 		logger.Log.Debug("Ошибка сериализации ответа", zap.Error(err))
+	}
+}
+
+// DeleteUserURLs обрабатывает DELETE /api/user/urls.
+func (h *ShortenerHandler) DeleteUserURLs(w http.ResponseWriter, r *http.Request) {
+	// Если токен был невалиден – сразу 401, как в UserURLs
+	if invalid, ok := r.Context().Value(auth.TokenInvalidKey).(bool); ok && invalid {
+		writeJSONError(w, "user token is invalid", http.StatusUnauthorized)
+		return
+	}
+
+	// userID гарантированно присутствует после middleware
+	userID, _ := r.Context().Value(auth.UserIDKey).(string)
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, int64(h.MaxBodySize)))
+	if err != nil {
+		writeJSONError(w, "Ошибка чтения тела", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	var shortURLs []string
+	if err := json.Unmarshal(body, &shortURLs); err != nil {
+		writeJSONError(w, "Некорректный JSON", http.StatusBadRequest)
+		return
+	}
+
+	if len(shortURLs) == 0 {
+		writeJSONError(w, "Список идентификаторов пуст", http.StatusBadRequest)
+		return
+	}
+
+	// Запускаем асинхронное удаление с использованием паттерна fan-in
+	go h.deleteURLsAsync(shortURLs, userID)
+
+	// Немедленно отвечаем 202 Accepted
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// deleteURLsAsync выполняет удаление в фоне, используя fan-in для параллельной обработки батчей.
+func (h *ShortenerHandler) deleteURLsAsync(shortURLs []string, userID string) {
+	const numWorkers = 4
+
+	// Канал для батчей идентификаторов
+	batchCh := make(chan []string, numWorkers)
+
+	// Разбиваем список на батчи
+	batchSize := (len(shortURLs) + numWorkers - 1) / numWorkers
+	for i := 0; i < len(shortURLs); i += batchSize {
+		end := i + batchSize
+		if end > len(shortURLs) {
+			end = len(shortURLs)
+		}
+		batchCh <- shortURLs[i:end]
+	}
+	close(batchCh)
+
+	// Канал для сбора ошибок (fan-in)
+	errCh := make(chan error, numWorkers)
+
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for batch := range batchCh {
+				if err := h.Store.BatchDelete(batch, userID); err != nil {
+					errCh <- err
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	// Логируем ошибки (результат пользователю не отправляется)
+	for err := range errCh {
+		logger.Log.Error("Ошибка удаления URL", zap.Error(err))
 	}
 }
 

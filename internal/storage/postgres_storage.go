@@ -100,15 +100,19 @@ func (s *PostgresStore) SaveBatch(records map[string]string, userID string) erro
 // Get возвращает оригинальный URL по сокращённому идентификатору.
 func (s *PostgresStore) Get(id string) (string, error) {
 	var originalURL string
+	var isDeleted bool
 	err := s.pool.QueryRow(context.Background(),
-		`SELECT original_url FROM service_data.urls WHERE short_url = $1`, id,
-	).Scan(&originalURL)
+		`SELECT original_url, is_deleted FROM service_data.urls WHERE short_url = $1`, id,
+	).Scan(&originalURL, &isDeleted)
 
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", fmt.Errorf("url с идентификатором %s не найден: %w", id, err)
 		}
 		return "", fmt.Errorf("ошибка получения: %w", err)
+	}
+	if isDeleted {
+		return "", ErrURLDeleted
 	}
 	return originalURL, nil
 }
@@ -117,7 +121,8 @@ func (s *PostgresStore) Get(id string) (string, error) {
 func (s *PostgresStore) GetByOriginalURL(originalURL string) (string, error) {
 	var shortURL string
 	err := s.pool.QueryRow(context.Background(),
-		`SELECT short_url FROM service_data.urls WHERE original_url = $1`, originalURL,
+		`SELECT short_url FROM service_data.urls 
+         	 WHERE original_url = $1 AND is_deleted = FALSE`, originalURL,
 	).Scan(&shortURL)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -131,7 +136,8 @@ func (s *PostgresStore) GetByOriginalURL(originalURL string) (string, error) {
 // GetUserURLs возвращает все когда-либо сокращённые пользователем ссылки.
 func (s *PostgresStore) GetUserURLs(userID string) ([]model.UserURL, error) {
 	rows, err := s.pool.Query(context.Background(),
-		`SELECT short_url, original_url FROM service_data.urls WHERE user_id = $1`,
+		`SELECT short_url, original_url FROM service_data.urls 
+         	 WHERE user_id = $1 AND is_deleted = FALSE`,
 		userID,
 	)
 	if err != nil {
@@ -146,7 +152,7 @@ func (s *PostgresStore) GetUserURLs(userID string) ([]model.UserURL, error) {
 			return nil, fmt.Errorf("ошибка чтения строки: %w", err)
 		}
 		urls = append(urls, model.UserURL{
-			ShortURL:    shortID, // идентификатор без базового URL
+			ShortURL:    shortID,
 			OriginalURL: origURL,
 		})
 	}
@@ -155,6 +161,36 @@ func (s *PostgresStore) GetUserURLs(userID string) ([]model.UserURL, error) {
 	}
 
 	return urls, nil
+}
+
+// BatchDelete помечает несколько сокращённых ссылок как удалённые одним запросом.
+func (s *PostgresStore) BatchDelete(shortURLs []string, userID string) error {
+	if len(shortURLs) == 0 {
+		return nil
+	}
+
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("не удалось начать транзакцию: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	query := `
+        UPDATE service_data.urls
+        SET is_deleted = TRUE
+        WHERE short_url = $1 AND user_id = $2
+    `
+	for _, shortURL := range shortURLs {
+		if _, err := tx.Exec(ctx, query, shortURL, userID); err != nil {
+			return fmt.Errorf("ошибка обновления для %s: %w", shortURL, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("ошибка коммита транзакции: %w", err)
+	}
+	return nil
 }
 
 // Ping проверяет доступность базы данных.

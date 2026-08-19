@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
@@ -107,6 +108,7 @@ func newTestRouter(store storage.Store) http.Handler {
 	r.Get("/api/user/urls", h.UserURLs)
 	r.Post("/api/shorten", h.ShortenAPI)
 	r.Post("/api/shorten/batch", h.ShortenBatch)
+	r.Delete("/api/user/urls", h.DeleteUserURLs) // добавлено
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Некорректный запрос", http.StatusBadRequest)
@@ -136,7 +138,6 @@ func TestCreateShortLink_ValidURL(t *testing.T) {
 	require.NoError(t, err, "ID %s не найден в хранилище", id)
 	assert.Equal(t, originalURL, saved)
 
-	// Кука должна быть установлена
 	cookie := getCookieFromResponse(t, resp)
 	require.NotNil(t, cookie, "кука user_token должна быть установлена")
 	assert.NotEmpty(t, cookie.Value)
@@ -210,6 +211,24 @@ func TestRedirect_NonExistentID(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	assert.Equal(t, "Некорректный запрос\n", body)
+}
+
+func TestRedirect_DeletedURL(t *testing.T) {
+	store, _ := storage.NewFileStore()
+	id := "deleted1"
+	originalURL := "https://example.com/deleted-target"
+	err := store.Save(id, originalURL, "test-user-id")
+	require.NoError(t, err)
+
+	// Помечаем как удалённую вручную через BatchDelete
+	err = store.BatchDelete([]string{id}, "test-user-id")
+	require.NoError(t, err)
+
+	ts := httptest.NewServer(newTestRouter(store))
+	defer ts.Close()
+
+	resp, _ := testRequest(t, ts, http.MethodGet, "/"+id, nil)
+	assert.Equal(t, http.StatusGone, resp.StatusCode)
 }
 
 // ---------- ShortenAPI ----------
@@ -335,7 +354,6 @@ func TestUserURLs_NoURLs(t *testing.T) {
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
-	// Первый запрос без куки – middleware создаст новую, вернётся 204
 	resp, body := testRequest(t, ts, http.MethodGet, "/api/user/urls", nil)
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 	assert.Empty(t, body)
@@ -346,17 +364,14 @@ func TestUserURLs_WithURLs(t *testing.T) {
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
-	// Сначала создадим две короткие ссылки, чтобы получить куку и userID
 	resp1, _ := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/urls1"))
 	require.Equal(t, http.StatusCreated, resp1.StatusCode)
 	cookie := getCookieFromResponse(t, resp1)
 	require.NotNil(t, cookie)
 
-	// Второй запрос с той же кукой
 	resp2, _ := testRequestWithCookie(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/urls2"), cookie)
 	require.Equal(t, http.StatusCreated, resp2.StatusCode)
 
-	// Теперь запрос к /api/user/urls с кукой
 	resp, body := testRequestWithCookie(t, ts, http.MethodGet, "/api/user/urls", nil, cookie)
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -366,11 +381,9 @@ func TestUserURLs_WithURLs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, urls, 2)
 
-	// Проверим, что возвращённые ссылки содержат наши оригинальные URL
 	origURLs := make([]string, len(urls))
 	for i, u := range urls {
 		origURLs[i] = u.OriginalURL
-		// ShortURL должен быть полным URL, начинающимся с testBaseURL
 		assert.True(t, strings.HasPrefix(u.ShortURL, testBaseURL+"/"))
 	}
 	assert.Contains(t, origURLs, "https://example.com/urls1")
@@ -382,7 +395,6 @@ func TestUserURLs_InvalidToken(t *testing.T) {
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
-	// Создаём "невалидную" куку – просто набор символов, не соответствующий формату
 	invalidCookie := &http.Cookie{
 		Name:  "user_token",
 		Value: "some-garbage-value",
@@ -399,9 +411,7 @@ func TestUserURLs_InvalidTokenSignature(t *testing.T) {
 	ts := httptest.NewServer(newTestRouter(store))
 	defer ts.Close()
 
-	// Создаём куку с правильным userID, но с подписью от другого секрета
 	userID := "test-user-id"
-	// Вычислим корректную подпись для этого userID с "правильным" секретом, но подставим неверную
 	wrongSignature := "0123456789abcdef"
 	value := userID + ":" + wrongSignature
 	invalidCookie := &http.Cookie{
@@ -413,6 +423,137 @@ func TestUserURLs_InvalidTokenSignature(t *testing.T) {
 
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	assert.Contains(t, body, "user token is invalid")
+}
+
+// ---------- DeleteUserURLs ----------
+
+// waitForDeletion ожидает, пока ссылка с заданным ID будет помечена удалённой в хранилище.
+func waitForDeletion(t *testing.T, store storage.Store, id string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		_, err := store.Get(id)
+		if err == storage.ErrURLDeleted {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("время ожидания удаления истекло")
+}
+
+func TestDeleteUserURLs_Success(t *testing.T) {
+	store, _ := storage.NewFileStore()
+	ts := httptest.NewServer(newTestRouter(store))
+	defer ts.Close()
+
+	respCreate, body := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/to-delete"))
+	require.Equal(t, http.StatusCreated, respCreate.StatusCode)
+	cookie := getCookieFromResponse(t, respCreate)
+	require.NotNil(t, cookie)
+
+	id := getIDFromResponse(t, body)
+
+	reqBody := `["` + id + `"]`
+	resp, _ := testRequestWithCookie(t, ts, http.MethodDelete, "/api/user/urls", strings.NewReader(reqBody), cookie)
+
+	assert.Equal(t, http.StatusAccepted, resp.StatusCode)
+
+	waitForDeletion(t, store, id, 2*time.Second)
+
+	respGet, _ := testRequest(t, ts, http.MethodGet, "/"+id, nil)
+	assert.Equal(t, http.StatusGone, respGet.StatusCode)
+}
+
+func TestDeleteUserURLs_InvalidToken(t *testing.T) {
+	store, _ := storage.NewFileStore()
+	ts := httptest.NewServer(newTestRouter(store))
+	defer ts.Close()
+
+	invalidCookie := &http.Cookie{
+		Name:  "user_token",
+		Value: "invalid-token-format",
+	}
+
+	reqBody := `["someid"]`
+	resp, body := testRequestWithCookie(t, ts, http.MethodDelete, "/api/user/urls", strings.NewReader(reqBody), invalidCookie)
+
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	assert.Contains(t, body, "user token is invalid")
+}
+
+func TestDeleteUserURLs_EmptyBody(t *testing.T) {
+	store, _ := storage.NewFileStore()
+	ts := httptest.NewServer(newTestRouter(store))
+	defer ts.Close()
+
+	respCreate, _ := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/empty-body"))
+	require.Equal(t, http.StatusCreated, respCreate.StatusCode)
+	cookie := getCookieFromResponse(t, respCreate)
+	require.NotNil(t, cookie)
+
+	resp, _ := testRequestWithCookie(t, ts, http.MethodDelete, "/api/user/urls", strings.NewReader(""), cookie)
+
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestDeleteUserURLs_InvalidJSON(t *testing.T) {
+	store, _ := storage.NewFileStore()
+	ts := httptest.NewServer(newTestRouter(store))
+	defer ts.Close()
+
+	respCreate, _ := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/invalid-json"))
+	require.Equal(t, http.StatusCreated, respCreate.StatusCode)
+	cookie := getCookieFromResponse(t, respCreate)
+	require.NotNil(t, cookie)
+
+	resp, body := testRequestWithCookie(t, ts, http.MethodDelete, "/api/user/urls", strings.NewReader("not-json"), cookie)
+
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, body, "Некорректный JSON")
+}
+
+func TestDeleteUserURLs_EmptyList(t *testing.T) {
+	store, _ := storage.NewFileStore()
+	ts := httptest.NewServer(newTestRouter(store))
+	defer ts.Close()
+
+	respCreate, _ := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/empty-list"))
+	require.Equal(t, http.StatusCreated, respCreate.StatusCode)
+	cookie := getCookieFromResponse(t, respCreate)
+	require.NotNil(t, cookie)
+
+	resp, body := testRequestWithCookie(t, ts, http.MethodDelete, "/api/user/urls", strings.NewReader("[]"), cookie)
+
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Contains(t, body, "Список идентификаторов пуст")
+}
+
+func TestDeleteUserURLs_UserCannotDeleteOthers(t *testing.T) {
+	store, _ := storage.NewFileStore()
+	ts := httptest.NewServer(newTestRouter(store))
+	defer ts.Close()
+
+	resp1, body1 := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/user1-url"))
+	require.Equal(t, http.StatusCreated, resp1.StatusCode)
+	cookie1 := getCookieFromResponse(t, resp1)
+	require.NotNil(t, cookie1)
+	id1 := getIDFromResponse(t, body1)
+
+	resp2, _ := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/user2-url"))
+	require.Equal(t, http.StatusCreated, resp2.StatusCode)
+	cookie2 := getCookieFromResponse(t, resp2)
+	require.NotNil(t, cookie2)
+
+	reqBody := `["` + id1 + `"]`
+	respDelete, _ := testRequestWithCookie(t, ts, http.MethodDelete, "/api/user/urls", strings.NewReader(reqBody), cookie2)
+	assert.Equal(t, http.StatusAccepted, respDelete.StatusCode)
+
+	// Даём время на асинхронную обработку
+	time.Sleep(200 * time.Millisecond)
+
+	// Ссылка первого пользователя должна остаться доступной
+	respGet, _ := testRequest(t, ts, http.MethodGet, "/"+id1, nil)
+	assert.Equal(t, http.StatusTemporaryRedirect, respGet.StatusCode)
 }
 
 // ---------- Маршрутизация ----------

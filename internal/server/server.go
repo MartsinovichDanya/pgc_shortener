@@ -55,6 +55,7 @@ func Run() error {
 	r.Post("/api/shorten", ServiceHandler.ShortenAPI)
 	r.Post("/api/shorten/batch", ServiceHandler.ShortenBatch)
 	r.Get("/api/user/urls", ServiceHandler.UserURLs)
+	r.Delete("/api/user/urls", ServiceHandler.DeleteUserURLs)
 	r.Get("/ping", ServiceHandler.PingHandler)
 	r.Get("/{id}", ServiceHandler.Redirect)
 

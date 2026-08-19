@@ -17,6 +17,7 @@ type Record struct {
 	ShortURL    string `json:"short_url"`
 	OriginalURL string `json:"original_url"`
 	UserID      string `json:"user_id"`
+	IsDeleted   bool   `json:"is_deleted"`
 }
 
 // FileStore – потокобезопасное in-memory хранилище сокращённых URL с сохранением в файл.
@@ -55,6 +56,7 @@ func NewFileStore(filename ...string) (Store, error) {
 			if err := json.Unmarshal([]byte(line), &rec); err != nil {
 				return nil, fmt.Errorf("ошибка разбора строки хранилища: %w", err)
 			}
+			// Если поле IsDeleted отсутствовало в старых файлах, оно примет false автоматически.
 			s.data[rec.ShortURL] = rec
 		}
 		if err := scanner.Err(); err != nil {
@@ -70,7 +72,7 @@ func (s *FileStore) Save(id, originalURL, userID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Проверяем, нет ли уже такого original_url
+	// Проверяем, нет ли уже такого original_url (учитываем и удалённые, как в PostgresStore)
 	for _, rec := range s.data {
 		if rec.OriginalURL == originalURL {
 			return ErrURLExists
@@ -82,6 +84,7 @@ func (s *FileStore) Save(id, originalURL, userID string) error {
 		ShortURL:    id,
 		OriginalURL: originalURL,
 		UserID:      userID,
+		IsDeleted:   false,
 	}
 	s.data[id] = record
 
@@ -106,6 +109,7 @@ func (s *FileStore) SaveBatch(records map[string]string, userID string) error {
 			ShortURL:    id,
 			OriginalURL: originalURL,
 			UserID:      userID,
+			IsDeleted:   false,
 		}
 		s.data[id] = rec
 		newRecords = append(newRecords, rec)
@@ -133,39 +137,74 @@ func (s *FileStore) SaveBatch(records map[string]string, userID string) error {
 	return nil
 }
 
-// Get возвращает оригинальный URL по идентификатору.
+// BatchDelete помечает несколько ссылок как удалённые.
+// Пользователь может удалять только свои ссылки.
+func (s *FileStore) BatchDelete(shortURLs []string, userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(shortURLs) == 0 {
+		return nil
+	}
+
+	// Устанавливаем флаг is_deleted для записей, принадлежащих пользователю
+	for _, id := range shortURLs {
+		rec, ok := s.data[id]
+		if ok && rec.UserID == userID {
+			rec.IsDeleted = true
+			s.data[id] = rec
+		}
+		// Записи, не найденные или чужие, игнорируются
+	}
+
+	// Перезаписываем файл полностью, чтобы отразить изменения флагов
+	if s.filename != "" {
+		if err := s.writeAll(); err != nil {
+			return fmt.Errorf("ошибка перезаписи файла хранилища: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// Get возвращает оригинальный URL по идентификатору (только для неудалённых записей).
 func (s *FileStore) Get(id string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
 	record, ok := s.data[id]
 	if !ok {
 		return "", fmt.Errorf("идентификатор %s не найден", id)
 	}
+	if record.IsDeleted {
+		return "", ErrURLDeleted
+	}
 	return record.OriginalURL, nil
 }
 
-// GetByOriginalURL возвращает короткий идентификатор по оригинальному URL.
+// GetByOriginalURL возвращает короткий идентификатор по оригинальному URL (только для неудалённых записей).
 func (s *FileStore) GetByOriginalURL(originalURL string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
 	for _, rec := range s.data {
-		if rec.OriginalURL == originalURL {
+		if !rec.IsDeleted && rec.OriginalURL == originalURL {
 			return rec.ShortURL, nil
 		}
 	}
 	return "", fmt.Errorf("original URL не найден")
 }
 
-// GetUserURLs возвращает все сокращённые пользователем ссылки в виде model.UserURL.
+// GetUserURLs возвращает все сокращённые пользователем ссылки (исключая удалённые).
 func (s *FileStore) GetUserURLs(userID string) ([]model.UserURL, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var result []model.UserURL
 	for _, rec := range s.data {
-		if rec.UserID == userID {
+		if rec.UserID == userID && !rec.IsDeleted {
 			result = append(result, model.UserURL{
-				ShortURL:    rec.ShortURL, // только идентификатор; полный URL соберётся в хендлере
+				ShortURL:    rec.ShortURL,
 				OriginalURL: rec.OriginalURL,
 			})
 		}
@@ -188,6 +227,29 @@ func (s *FileStore) appendRecord(rec Record) error {
 
 	if _, err := file.Write(append(data, '\n')); err != nil {
 		return fmt.Errorf("ошибка дозаписи в файл: %w", err)
+	}
+	return nil
+}
+
+// writeAll полностью перезаписывает файл хранилища текущим содержимым map.
+func (s *FileStore) writeAll() error {
+	file, err := os.OpenFile(s.filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("не удалось открыть файл для перезаписи: %w", err)
+	}
+	defer file.Close()
+
+	writer := bufio.NewWriter(file)
+	defer writer.Flush()
+
+	for _, rec := range s.data {
+		data, err := json.Marshal(rec)
+		if err != nil {
+			return fmt.Errorf("ошибка сериализации записи: %w", err)
+		}
+		if _, err := writer.Write(append(data, '\n')); err != nil {
+			return fmt.Errorf("ошибка записи в файл: %w", err)
+		}
 	}
 	return nil
 }
