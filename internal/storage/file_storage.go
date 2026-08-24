@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -22,16 +23,18 @@ type Record struct {
 
 // FileStore – потокобезопасное in-memory хранилище сокращённых URL с сохранением в файл.
 type FileStore struct {
-	mu       sync.RWMutex
-	data     map[string]Record
-	filename string
+	mu            sync.RWMutex
+	data          map[string]Record
+	originalIndex map[string]string
+	filename      string
 }
 
 // NewFileStore создаёт новый экземпляр FileStore, реализующий Store.
 // Если передан путь к файлу, данные загружаются из него; иначе – только в памяти.
 func NewFileStore(filename ...string) (Store, error) {
 	s := &FileStore{
-		data: make(map[string]Record),
+		data:          make(map[string]Record),
+		originalIndex: make(map[string]string),
 	}
 
 	if len(filename) > 0 && filename[0] != "" {
@@ -56,8 +59,8 @@ func NewFileStore(filename ...string) (Store, error) {
 			if err := json.Unmarshal([]byte(line), &rec); err != nil {
 				return nil, fmt.Errorf("ошибка разбора строки хранилища: %w", err)
 			}
-			// Если поле IsDeleted отсутствовало в старых файлах, оно примет false автоматически.
 			s.data[rec.ShortURL] = rec
+			s.originalIndex[rec.OriginalURL] = rec.ShortURL
 		}
 		if err := scanner.Err(); err != nil {
 			return nil, fmt.Errorf("ошибка чтения файла хранилища: %w", err)
@@ -68,15 +71,13 @@ func NewFileStore(filename ...string) (Store, error) {
 }
 
 // Save сохраняет пару (короткий идентификатор, оригинальный URL) для пользователя userID.
-func (s *FileStore) Save(id, originalURL, userID string) error {
+func (s *FileStore) Save(ctx context.Context, id, originalURL, userID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Проверяем, нет ли уже такого original_url (учитываем и удалённые, как в PostgresStore)
-	for _, rec := range s.data {
-		if rec.OriginalURL == originalURL {
-			return ErrURLExists
-		}
+	// O(1) проверка дубликата по обратному индексу (включая удалённые записи)
+	if _, exists := s.originalIndex[originalURL]; exists {
+		return ErrURLExists
 	}
 
 	record := Record{
@@ -87,6 +88,7 @@ func (s *FileStore) Save(id, originalURL, userID string) error {
 		IsDeleted:   false,
 	}
 	s.data[id] = record
+	s.originalIndex[originalURL] = id // обновляем индекс
 
 	if s.filename != "" {
 		if err := s.appendRecord(record); err != nil {
@@ -97,11 +99,22 @@ func (s *FileStore) Save(id, originalURL, userID string) error {
 }
 
 // SaveBatch сохраняет множество пар (id, originalURL) за одну операцию для пользователя userID.
-func (s *FileStore) SaveBatch(records map[string]string, userID string) error {
+func (s *FileStore) SaveBatch(ctx context.Context, records map[string]string, userID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Собираем все новые записи
+	// Проверяем на дубликаты до вставки: как внутри самого батча, так и относительно существующих данных.
+	seen := make(map[string]struct{}, len(records))
+	for _, originalURL := range records {
+		if _, exists := s.originalIndex[originalURL]; exists {
+			return ErrURLExists
+		}
+		if _, exists := seen[originalURL]; exists {
+			return ErrURLExists
+		}
+		seen[originalURL] = struct{}{}
+	}
+
 	newRecords := make([]Record, 0, len(records))
 	for id, originalURL := range records {
 		rec := Record{
@@ -112,10 +125,10 @@ func (s *FileStore) SaveBatch(records map[string]string, userID string) error {
 			IsDeleted:   false,
 		}
 		s.data[id] = rec
+		s.originalIndex[originalURL] = id // обновляем индекс
 		newRecords = append(newRecords, rec)
 	}
 
-	// Пишем в файл, если путь задан
 	if s.filename != "" {
 		file, err := os.OpenFile(s.filename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
 		if err != nil {
@@ -139,7 +152,9 @@ func (s *FileStore) SaveBatch(records map[string]string, userID string) error {
 
 // BatchDelete помечает несколько ссылок как удалённые.
 // Пользователь может удалять только свои ссылки.
-func (s *FileStore) BatchDelete(shortURLs []string, userID string) error {
+// Обратный индекс не изменяется: он по-прежнему хранит соответствие originalURL -> shortURL
+// для проверки дубликатов (включая удалённые), что соответствует поведению PostgresStore.
+func (s *FileStore) BatchDelete(ctx context.Context, shortURLs []string, userID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -147,7 +162,6 @@ func (s *FileStore) BatchDelete(shortURLs []string, userID string) error {
 		return nil
 	}
 
-	// Устанавливаем флаг is_deleted для записей, принадлежащих пользователю
 	for _, id := range shortURLs {
 		rec, ok := s.data[id]
 		if ok && rec.UserID == userID {
@@ -157,7 +171,6 @@ func (s *FileStore) BatchDelete(shortURLs []string, userID string) error {
 		// Записи, не найденные или чужие, игнорируются
 	}
 
-	// Перезаписываем файл полностью, чтобы отразить изменения флагов
 	if s.filename != "" {
 		if err := s.writeAll(); err != nil {
 			return fmt.Errorf("ошибка перезаписи файла хранилища: %w", err)
@@ -168,7 +181,7 @@ func (s *FileStore) BatchDelete(shortURLs []string, userID string) error {
 }
 
 // Get возвращает оригинальный URL по идентификатору (только для неудалённых записей).
-func (s *FileStore) Get(id string) (string, error) {
+func (s *FileStore) Get(ctx context.Context, id string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -183,20 +196,24 @@ func (s *FileStore) Get(id string) (string, error) {
 }
 
 // GetByOriginalURL возвращает короткий идентификатор по оригинальному URL (только для неудалённых записей).
-func (s *FileStore) GetByOriginalURL(originalURL string) (string, error) {
+// Использует обратный индекс для O(1) поиска.
+func (s *FileStore) GetByOriginalURL(ctx context.Context, originalURL string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	for _, rec := range s.data {
-		if !rec.IsDeleted && rec.OriginalURL == originalURL {
-			return rec.ShortURL, nil
-		}
+	shortID, exists := s.originalIndex[originalURL]
+	if !exists {
+		return "", fmt.Errorf("original URL не найден")
 	}
-	return "", fmt.Errorf("original URL не найден")
+	// Проверяем, что запись не удалена
+	if rec, ok := s.data[shortID]; ok && rec.IsDeleted {
+		return "", fmt.Errorf("original URL не найден")
+	}
+	return shortID, nil
 }
 
 // GetUserURLs возвращает все сокращённые пользователем ссылки (исключая удалённые).
-func (s *FileStore) GetUserURLs(userID string) ([]model.UserURL, error) {
+func (s *FileStore) GetUserURLs(ctx context.Context, userID string) ([]model.UserURL, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

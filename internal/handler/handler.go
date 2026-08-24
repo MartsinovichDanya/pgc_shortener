@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/mailru/easyjson"
@@ -24,22 +25,44 @@ import (
 
 // ShortenerHandler содержит зависимости HTTP-обработчиков.
 type ShortenerHandler struct {
-	Store       storage.Store // интерфейс изменён: Save и SaveBatch теперь принимают userID
+	Store       storage.Store
 	BaseURL     string
 	MaxBodySize int
 	IDLength    int
 	UseDB       bool
+
+	deleteCh        chan deleteRequest
+	deleteWg        sync.WaitGroup
+	deleteCloseOnce sync.Once
+}
+
+// deleteRequest — элемент очереди на удаление.
+type deleteRequest struct {
+	userID  string
+	shortID string
 }
 
 // NewShortenerHandler – конструктор обработчиков.
 func NewShortenerHandler(store storage.Store, baseURL string, maxBodySize, idLength int, UseDB bool) *ShortenerHandler {
-	return &ShortenerHandler{
+	h := &ShortenerHandler{
 		Store:       store,
 		BaseURL:     baseURL,
 		MaxBodySize: maxBodySize,
 		IDLength:    idLength,
 		UseDB:       UseDB,
+		deleteCh:    make(chan deleteRequest, 1000), // буфер на 1000 элементов
 	}
+	h.deleteWg.Add(1)
+	go h.deleteWorker()
+	return h
+}
+
+// Shutdown корректно останавливает фоновый воркер удаления.
+func (h *ShortenerHandler) Shutdown() {
+	h.deleteCloseOnce.Do(func() {
+		close(h.deleteCh) // сигнал воркеру: обработать все оставшиеся элементы и завершиться
+		h.deleteWg.Wait()
+	})
 }
 
 // CreateShortLink обрабатывает POST / – создание короткой ссылки.
@@ -74,9 +97,9 @@ func (h *ShortenerHandler) CreateShortLink(w http.ResponseWriter, r *http.Reques
 	userID, _ := r.Context().Value(auth.UserIDKey).(string)
 
 	// Сохраняем с привязкой к пользователю
-	if err := h.Store.Save(id, originalURL, userID); err != nil {
+	if err := h.Store.Save(r.Context(), id, originalURL, userID); err != nil {
 		if errors.Is(err, storage.ErrURLExists) {
-			existingShort, errGet := h.Store.GetByOriginalURL(originalURL)
+			existingShort, errGet := h.Store.GetByOriginalURL(r.Context(), originalURL)
 			if errGet != nil {
 				logger.Log.Error("Ошибка получения существующего URL", zap.Error(errGet))
 				http.Error(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
@@ -136,9 +159,9 @@ func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
 	// Получаем userID из контекста
 	userID, _ := r.Context().Value(auth.UserIDKey).(string)
 
-	if err := h.Store.Save(id, originalURL, userID); err != nil {
+	if err := h.Store.Save(r.Context(), id, originalURL, userID); err != nil {
 		if errors.Is(err, storage.ErrURLExists) {
-			existingShort, errGet := h.Store.GetByOriginalURL(originalURL)
+			existingShort, errGet := h.Store.GetByOriginalURL(r.Context(), originalURL)
 			if errGet != nil {
 				logger.Log.Error("Ошибка получения существующего URL", zap.Error(errGet))
 				writeJSONError(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
@@ -178,7 +201,7 @@ func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
 // Redirect обрабатывает GET /{id} – перенаправление на оригинальный URL.
 func (h *ShortenerHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	originalURL, err := h.Store.Get(id)
+	originalURL, err := h.Store.Get(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, storage.ErrURLDeleted) {
 			http.Error(w, "Gone", http.StatusGone)
@@ -194,16 +217,15 @@ func (h *ShortenerHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusTemporaryRedirect)
 }
 
+// PingHandler обрабатывает GET /ping – проверка соединения с БД (если используется).
 func (h *ShortenerHandler) PingHandler(w http.ResponseWriter, r *http.Request) {
 	if !h.UseDB {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	type pinger interface {
-		Ping(context.Context) error
-	}
-	p, ok := h.Store.(pinger)
+	// Проверяем, реализует ли хранилище интерфейс storage.Pinger
+	p, ok := h.Store.(storage.Pinger)
 	if !ok {
 		logger.Log.Error("хранилище не поддерживает Ping")
 		http.Error(w, "Ping not supported", http.StatusInternalServerError)
@@ -219,6 +241,7 @@ func (h *ShortenerHandler) PingHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// ShortenBatch обрабатывает POST /api/shorten/batch – массовое создание коротких ссылок.
 func (h *ShortenerHandler) ShortenBatch(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, int64(h.MaxBodySize)))
 	if err != nil {
@@ -277,7 +300,7 @@ func (h *ShortenerHandler) ShortenBatch(w http.ResponseWriter, r *http.Request) 
 	userID, _ := r.Context().Value(auth.UserIDKey).(string)
 
 	// Атомарная пакетная вставка
-	if err := h.Store.SaveBatch(records, userID); err != nil {
+	if err := h.Store.SaveBatch(r.Context(), records, userID); err != nil {
 		logger.Log.Error("Ошибка пакетного сохранения", zap.Error(err))
 		writeJSONError(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
 		return
@@ -315,7 +338,7 @@ func (h *ShortenerHandler) UserURLs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	urls, err := h.Store.GetUserURLs(userID)
+	urls, err := h.Store.GetUserURLs(r.Context(), userID)
 	if err != nil {
 		logger.Log.Error("Ошибка получения URL пользователя", zap.Error(err))
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -367,53 +390,76 @@ func (h *ShortenerHandler) DeleteUserURLs(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Запускаем асинхронное удаление с использованием паттерна fan-in
-	go h.deleteURLsAsync(shortURLs, userID)
+	// Отправляем каждый идентификатор в канал фонового воркера (неблокирующе)
+	for _, id := range shortURLs {
+		req := deleteRequest{userID: userID, shortID: id}
+		select {
+		case h.deleteCh <- req:
+			// Успешно отправлено
+		default:
+			// Канал переполнен – логируем и отбрасываем
+			logger.Log.Warn("Канал удаления переполнен, запрос отброшен",
+				zap.String("userID", userID),
+				zap.String("shortID", id),
+			)
+		}
+	}
 
 	// Немедленно отвечаем 202 Accepted
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// deleteURLsAsync выполняет удаление в фоне, используя fan-in для параллельной обработки батчей.
-func (h *ShortenerHandler) deleteURLsAsync(shortURLs []string, userID string) {
-	const numWorkers = 4
+// deleteWorker — фоновый воркер, накапливающий идентификаторы и отправляющий их батчами в хранилище.
+func (h *ShortenerHandler) deleteWorker() {
+	defer h.deleteWg.Done()
 
-	// Канал для батчей идентификаторов
-	batchCh := make(chan []string, numWorkers)
+	const (
+		flushInterval = time.Second // интервал сброса
+		maxBufferSize = 100         // максимальный суммарный размер буфера
+	)
 
-	// Разбиваем список на батчи
-	batchSize := (len(shortURLs) + numWorkers - 1) / numWorkers
-	for i := 0; i < len(shortURLs); i += batchSize {
-		end := i + batchSize
-		if end > len(shortURLs) {
-			end = len(shortURLs)
+	buffer := make(map[string][]string) // userID -> slice of shortIDs
+	totalItems := 0
+	ticker := time.NewTicker(flushInterval)
+	defer ticker.Stop()
+
+	// Внутренняя функция сброса буфера в хранилище
+	flush := func() {
+		if totalItems == 0 {
+			return
 		}
-		batchCh <- shortURLs[i:end]
-	}
-	close(batchCh)
-
-	// Канал для сбора ошибок (fan-in)
-	errCh := make(chan error, numWorkers)
-
-	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for batch := range batchCh {
-				if err := h.Store.BatchDelete(batch, userID); err != nil {
-					errCh <- err
-				}
+		// Используем фоновый контекст, так как здесь нет HTTP-запроса
+		ctx := context.Background()
+		for userID, ids := range buffer {
+			if err := h.Store.BatchDelete(ctx, ids, userID); err != nil {
+				logger.Log.Error("Ошибка пакетного удаления URL",
+					zap.Error(err),
+					zap.String("userID", userID),
+				)
 			}
-		}()
+		}
+		// Очистка буфера
+		buffer = make(map[string][]string)
+		totalItems = 0
 	}
 
-	wg.Wait()
-	close(errCh)
+	for {
+		select {
+		case req, ok := <-h.deleteCh:
+			if !ok {
+				// Канал закрыт – финальный сброс и выход
+				flush()
+				return
+			}
+			buffer[req.userID] = append(buffer[req.userID], req.shortID)
+			totalItems++
+			if totalItems >= maxBufferSize {
+				flush()
+			}
 
-	// Логируем ошибки (результат пользователю не отправляется)
-	for err := range errCh {
-		logger.Log.Error("Ошибка удаления URL", zap.Error(err))
+		case <-ticker.C:
+			flush()
+		}
 	}
 }
 

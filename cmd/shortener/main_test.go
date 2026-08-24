@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -108,7 +109,7 @@ func newTestRouter(store storage.Store) http.Handler {
 	r.Get("/api/user/urls", h.UserURLs)
 	r.Post("/api/shorten", h.ShortenAPI)
 	r.Post("/api/shorten/batch", h.ShortenBatch)
-	r.Delete("/api/user/urls", h.DeleteUserURLs) // добавлено
+	r.Delete("/api/user/urls", h.DeleteUserURLs)
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Некорректный запрос", http.StatusBadRequest)
@@ -134,7 +135,7 @@ func TestCreateShortLink_ValidURL(t *testing.T) {
 	assert.Equal(t, "text/plain", resp.Header.Get("Content-Type"))
 
 	id := getIDFromResponse(t, body)
-	saved, err := store.Get(id)
+	saved, err := store.Get(context.Background(), id)
 	require.NoError(t, err, "ID %s не найден в хранилище", id)
 	assert.Equal(t, originalURL, saved)
 
@@ -177,7 +178,7 @@ func TestCreateShortLink_BodyTruncation(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, resp.StatusCode)
 
 	id := getIDFromResponse(t, body)
-	saved, err := store.Get(id)
+	saved, err := store.Get(context.Background(), id)
 	require.NoError(t, err, "ID не найден в хранилище после усечения")
 
 	assert.Len(t, saved, testMaxBodySize, "длина сохранённого URL должна быть равна testMaxBodySize")
@@ -190,7 +191,7 @@ func TestRedirect_ExistingID(t *testing.T) {
 	store, _ := storage.NewFileStore()
 	id := "test1234"
 	originalURL := "https://example.com/redirect-target"
-	err := store.Save(id, originalURL, "test-user-id")
+	err := store.Save(context.Background(), id, originalURL, "test-user-id")
 	require.NoError(t, err)
 
 	ts := httptest.NewServer(newTestRouter(store))
@@ -217,11 +218,11 @@ func TestRedirect_DeletedURL(t *testing.T) {
 	store, _ := storage.NewFileStore()
 	id := "deleted1"
 	originalURL := "https://example.com/deleted-target"
-	err := store.Save(id, originalURL, "test-user-id")
+	err := store.Save(context.Background(), id, originalURL, "test-user-id")
 	require.NoError(t, err)
 
 	// Помечаем как удалённую вручную через BatchDelete
-	err = store.BatchDelete([]string{id}, "test-user-id")
+	err = store.BatchDelete(context.Background(), []string{id}, "test-user-id")
 	require.NoError(t, err)
 
 	ts := httptest.NewServer(newTestRouter(store))
@@ -254,7 +255,7 @@ func TestShortenAPI_ValidURL(t *testing.T) {
 	id := strings.TrimPrefix(shortURL, testBaseURL+"/")
 	assert.Len(t, id, testIDLength)
 
-	saved, err := store.Get(id)
+	saved, err := store.Get(context.Background(), id)
 	require.NoError(t, err)
 	assert.Equal(t, "https://example.com/api-test", saved)
 }
@@ -309,7 +310,7 @@ func TestShortenBatch_ValidBatch(t *testing.T) {
 		id := strings.TrimPrefix(item.ShortURL, testBaseURL+"/")
 		assert.Len(t, id, testIDLength)
 
-		_, err := store.Get(id)
+		_, err := store.Get(context.Background(), id)
 		assert.NoError(t, err, "ID %s должен существовать в хранилище", id)
 	}
 }
@@ -432,7 +433,7 @@ func waitForDeletion(t *testing.T, store storage.Store, id string, timeout time.
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		_, err := store.Get(id)
+		_, err := store.Get(context.Background(), id)
 		if err == storage.ErrURLDeleted {
 			return
 		}
