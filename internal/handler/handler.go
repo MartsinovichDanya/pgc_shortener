@@ -16,6 +16,7 @@ import (
 	"github.com/mailru/easyjson"
 	"go.uber.org/zap"
 
+	"github.com/MartsinovichDanya/pgc_shortener/internal/audit"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/auth"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/logger"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/model"
