@@ -1,10 +1,6 @@
 package audit
 
 import (
-    "bytes"
-    "encoding/json"
-    "net/http"
-    "os"
     "sync"
     "time"
 )
