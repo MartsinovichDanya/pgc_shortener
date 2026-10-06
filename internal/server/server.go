@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 
+	"github.com/MartsinovichDanya/pgc_shortener/internal/audit"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/auth"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/config"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/handler"
@@ -42,6 +43,20 @@ func Run() error {
 	ServiceHandler := handler.NewShortenerHandler(store, cfg.BaseURL, cfg.MaxBodySize, cfg.IDLength, cfg.UseDB)
 
 	logger.Log.Debug("Handler created")
+
+	if cfg.AuditFile != "" || cfg.AuditURL != "" {
+		auditSubject := audit.NewSubject()
+	
+		if cfg.AuditFile != "" {
+		    auditSubject.Attach(audit.NewFileObserver(cfg.AuditFile))
+		}
+		
+		if cfg.AuditURL != "" {
+		    auditSubject.Attach(audit.NewHTTPObserver(cfg.AuditURL))
+		}
+
+		logger.Log.Debug("Audit initialized")
+	}
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RequestID)
