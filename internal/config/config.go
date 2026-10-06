@@ -58,10 +58,10 @@ func GetConfig() *Config {
 		cfg.AuditFile = flagAuditFile
 	}
 	if cfg.AuditURL == "" {
-		cfg.AuditURL = flagDatabaseDSN
+		cfg.AuditURL = flagAuditURL
 	}
 
-	cfg.UseDB = cfg.flagAuditURL != ""
+	cfg.UseDB = cfg.DatabaseDSN != ""
 
 	return &cfg
 }
