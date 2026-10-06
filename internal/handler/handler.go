@@ -121,6 +121,9 @@ func (h *ShortenerHandler) CreateShortLink(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusCreated)
 	fmt.Fprint(w, shortURL)
+
+	event := audit.NewEvent(audit.ActionShorten, userID, originalURL)
+    h.auditSubject.Notify(event)
 }
 
 // ShortenAPI обрабатывает POST /api/shorten – создание короткой ссылки через JSON.
@@ -196,6 +199,9 @@ func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_, _ = w.Write(jsonResp)
+	
+	event := audit.NewEvent(audit.ActionShorten, userID, originalURL)
+    h.auditSubject.Notify(event)
 }
 
 // Redirect обрабатывает GET /{id} – перенаправление на оригинальный URL.
@@ -211,10 +217,14 @@ func (h *ShortenerHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Некорректный запрос", http.StatusBadRequest)
 		return
 	}
-
+	
 	logger.Log.Debug("Редирект", zap.String("id", id), zap.String("originalURL", originalURL))
 	w.Header().Set("Location", originalURL)
 	w.WriteHeader(http.StatusTemporaryRedirect)
+
+	userID, _ := r.Context().Value(auth.UserIDKey).(string)
+	event := audit.NewEvent(audit.ActionFollow, userID, originalURL)
+    h.auditSubject.Notify(event)
 }
 
 // PingHandler обрабатывает GET /ping – проверка соединения с БД (если используется).
