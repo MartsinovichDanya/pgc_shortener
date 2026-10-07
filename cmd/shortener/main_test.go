@@ -29,6 +29,8 @@ const (
 )
 
 // testRequest выполняет HTTP-запрос к тестовому серверу и возвращает ответ и тело.
+//
+//bodyclose:handled
 func testRequest(t *testing.T, ts *httptest.Server, method, path string, body io.Reader) (*http.Response, string) {
 	t.Helper()
 	req, err := http.NewRequest(method, ts.URL+path, body)
@@ -52,6 +54,8 @@ func testRequest(t *testing.T, ts *httptest.Server, method, path string, body io
 }
 
 // testRequestWithCookie выполняет запрос с предустановленной кукой.
+//
+//bodyclose:handled
 func testRequestWithCookie(t *testing.T, ts *httptest.Server, method, path string, body io.Reader, cookie *http.Cookie) (*http.Response, string) {
 	t.Helper()
 	req, err := http.NewRequest(method, ts.URL+path, body)
