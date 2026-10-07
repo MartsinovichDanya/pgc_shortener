@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/MartsinovichDanya/pgc_shortener/internal/audit"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/auth"
@@ -40,23 +41,28 @@ func Run() error {
 	}
 	logger.Log.Debug("Storage created")
 
-	ServiceHandler := handler.NewShortenerHandler(store, cfg.BaseURL, cfg.MaxBodySize, cfg.IDLength, cfg.UseDB)
+	var auditObserver audit.Observer
+
+	if cfg.EnableAudit {
+		auditSubject := audit.NewSubject(4096)
+
+		if cfg.AuditFile != "" {
+			auditSubject.Attach(audit.NewFileObserver(cfg.AuditFile))
+		}
+
+		if cfg.AuditURL != "" {
+			auditSubject.Attach(audit.NewHTTPObserver(cfg.AuditURL))
+		}
+
+		auditObserver = auditSubject
+		logger.Log.Debug("Audit initialized")
+
+		defer auditSubject.Shutdown(2 * time.Second)
+	}
+
+	ServiceHandler := handler.NewShortenerHandler(store, cfg.BaseURL, cfg.MaxBodySize, cfg.IDLength, cfg.UseDB, auditObserver)
 
 	logger.Log.Debug("Handler created")
-
-	if cfg.AuditFile != "" || cfg.AuditURL != "" {
-		auditSubject := audit.NewSubject()
-	
-		if cfg.AuditFile != "" {
-		    auditSubject.Attach(audit.NewFileObserver(cfg.AuditFile))
-		}
-		
-		if cfg.AuditURL != "" {
-		    auditSubject.Attach(audit.NewHTTPObserver(cfg.AuditURL))
-		}
-
-		logger.Log.Debug("Audit initialized")
-	}
 
 	r := chi.NewRouter()
 	r.Use(chiMiddleware.RequestID)

@@ -17,8 +17,9 @@ type Config struct {
 	FileStoragePath string `env:"FILE_STORAGE_PATH"`
 	DatabaseDSN     string `env:"DATABASE_DSN"`
 	CookieSecret    string `env:"COOKIE_SECRET" envDefault:"secret123"`
-	AuditFile		string `env:"AUDIT_FILE"`
-	AuditURL		string `env:"AUDIT_URL"`
+	AuditFile       string `env:"AUDIT_FILE"`
+	AuditURL        string `env:"AUDIT_URL"`
+	EnableAudit     bool
 	UseDB           bool
 }
 
@@ -60,6 +61,8 @@ func GetConfig() *Config {
 	if cfg.AuditURL == "" {
 		cfg.AuditURL = flagAuditURL
 	}
+
+	cfg.EnableAudit = cfg.AuditFile != "" || cfg.AuditURL != ""
 
 	cfg.UseDB = cfg.DatabaseDSN != ""
 

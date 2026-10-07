@@ -26,11 +26,12 @@ import (
 
 // ShortenerHandler содержит зависимости HTTP-обработчиков.
 type ShortenerHandler struct {
-	Store       storage.Store
-	BaseURL     string
-	MaxBodySize int
-	IDLength    int
-	UseDB       bool
+	Store         storage.Store
+	BaseURL       string
+	MaxBodySize   int
+	IDLength      int
+	UseDB         bool
+	auditObserver audit.Observer
 
 	deleteCh        chan deleteRequest
 	deleteWg        sync.WaitGroup
@@ -44,15 +45,21 @@ type deleteRequest struct {
 }
 
 // NewShortenerHandler – конструктор обработчиков.
-func NewShortenerHandler(store storage.Store, baseURL string, maxBodySize, idLength int, UseDB bool) *ShortenerHandler {
-	h := &ShortenerHandler{
-		Store:       store,
-		BaseURL:     baseURL,
-		MaxBodySize: maxBodySize,
-		IDLength:    idLength,
-		UseDB:       UseDB,
-		deleteCh:    make(chan deleteRequest, 1000), // буфер на 1000 элементов
+func NewShortenerHandler(store storage.Store, baseURL string, maxBodySize, idLength int, UseDB bool, auditObserver audit.Observer) *ShortenerHandler {
+	if auditObserver == nil {
+		auditObserver = audit.NoopNotifier{}
 	}
+
+	h := &ShortenerHandler{
+		Store:         store,
+		BaseURL:       baseURL,
+		MaxBodySize:   maxBodySize,
+		IDLength:      idLength,
+		UseDB:         UseDB,
+		auditObserver: auditObserver,
+		deleteCh:      make(chan deleteRequest, 1000), // буфер на 1000 элементов
+	}
+
 	h.deleteWg.Add(1)
 	go h.deleteWorker()
 	return h
@@ -119,12 +126,11 @@ func (h *ShortenerHandler) CreateShortLink(w http.ResponseWriter, r *http.Reques
 
 	shortURL := fmt.Sprintf("%s/%s", h.BaseURL, id)
 
+	h.auditObserver.Notify(audit.NewEvent(audit.ActionShorten, userID, originalURL))
+
 	w.Header().Set("Content-Type", "text/plain")
 	w.WriteHeader(http.StatusCreated)
 	fmt.Fprint(w, shortURL)
-
-	event := audit.NewEvent(audit.ActionShorten, userID, originalURL)
-    h.auditSubject.Notify(event)
 }
 
 // ShortenAPI обрабатывает POST /api/shorten – создание короткой ссылки через JSON.
@@ -197,12 +203,11 @@ func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.auditObserver.Notify(audit.NewEvent(audit.ActionShorten, userID, originalURL))
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_, _ = w.Write(jsonResp)
-	
-	event := audit.NewEvent(audit.ActionShorten, userID, originalURL)
-    h.auditSubject.Notify(event)
 }
 
 // Redirect обрабатывает GET /{id} – перенаправление на оригинальный URL.
@@ -218,14 +223,14 @@ func (h *ShortenerHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Некорректный запрос", http.StatusBadRequest)
 		return
 	}
-	
+
 	logger.Log.Debug("Редирект", zap.String("id", id), zap.String("originalURL", originalURL))
-	w.Header().Set("Location", originalURL)
-	w.WriteHeader(http.StatusTemporaryRedirect)
 
 	userID, _ := r.Context().Value(auth.UserIDKey).(string)
-	event := audit.NewEvent(audit.ActionFollow, userID, originalURL)
-    h.auditSubject.Notify(event)
+	h.auditObserver.Notify(audit.NewEvent(audit.ActionFollow, userID, originalURL))
+
+	w.Header().Set("Location", originalURL)
+	w.WriteHeader(http.StatusTemporaryRedirect)
 }
 
 // PingHandler обрабатывает GET /ping – проверка соединения с БД (если используется).

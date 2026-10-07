@@ -1,66 +1,95 @@
 package audit
 
 import (
-    "sync"
-    "time"
+	"sync"
+	"time"
 )
 
 // Action определяет тип действия
 type Action string
 
 const (
-    ActionShorten Action = "shorten"
-    ActionFollow  Action = "follow"
+	ActionShorten Action = "shorten"
+	ActionFollow  Action = "follow"
 )
 
 // Event представляет собой событие аудита
 type Event struct {
-    TS     int64  `json:"ts"`
-    Action Action `json:"action"`
-    UserID string `json:"user_id,omitempty"` // omitempty уберет поле, если оно пустое
-    URL    string `json:"url"`
+	TS     int64  `json:"ts"`
+	Action Action `json:"action"`
+	UserID string `json:"user_id,omitempty"` // omitempty уберет поле, если оно пустое
+	URL    string `json:"url"`
 }
 
 // NewEvent создает новое событие с текущим timestamp
 func NewEvent(action Action, userID, url string) Event {
-    return Event{
-        TS:     time.Now().Unix(),
-        Action: action,
-        UserID: userID,
-        URL:    url,
-    }
+	return Event{
+		TS:     time.Now().Unix(),
+		Action: action,
+		UserID: userID,
+		URL:    url,
+	}
 }
 
 // Observer описывает интерфейс наблюдателя
 type Observer interface {
-    Notify(event Event)
+	Notify(event Event)
 }
 
 // Subject (или AuditLogger) управляет наблюдателями
 type Subject struct {
-    observers []Observer
-    mu        sync.RWMutex
+	mu        sync.RWMutex
+	observers []Observer
+	ch        chan Event
+	wg        sync.WaitGroup
+	once      sync.Once
 }
 
-func NewSubject() *Subject {
-    return &Subject{
-        observers: make([]Observer, 0),
-    }
+func NewSubject(buffer int) *Subject {
+	s := &Subject{
+		observers: make([]Observer, 0),
+		ch:        make(chan Event, buffer),
+	}
+	s.wg.Add(1)
+	go s.worker()
+	return s
 }
 
-// Attach добавляет нового наблюдателя
 func (s *Subject) Attach(o Observer) {
-    s.mu.Lock()
-    defer s.mu.Unlock()
-    s.observers = append(s.observers, o)
+	s.mu.Lock()
+	s.observers = append(s.observers, o)
+	s.mu.Unlock()
 }
 
-// Notify рассылает событие всем наблюдателям.
-func (s *Subject) Notify(event Event) {
-    s.mu.RLock()
-    defer s.mu.RUnlock()
-    
-    for _, obs := range s.observers {
-        go obs.Notify(event)
-    }
+func (s *Subject) Notify(e Event) {
+	select {
+	case s.ch <- e:
+	default:
+	}
 }
+
+func (s *Subject) worker() {
+	defer s.wg.Done()
+	for e := range s.ch {
+		s.mu.RLock()
+		obs := s.observers
+		s.mu.RUnlock()
+		for _, o := range obs {
+			o.Notify(e)
+		}
+	}
+}
+
+func (s *Subject) Shutdown(timeout time.Duration) {
+	s.once.Do(func() { close(s.ch) })
+	done := make(chan struct{})
+	go func() { s.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+	}
+}
+
+type NoopNotifier struct{}
+
+func (NoopNotifier) Notify(Event) {}
