@@ -2,7 +2,7 @@ package server
 
 import (
 	"net/http"
-	_ "net/http/pprof"
+	"net/http/pprof"
 	"time"
 
 	"github.com/MartsinovichDanya/pgc_shortener/internal/audit"
@@ -87,6 +87,18 @@ func Run() error {
 	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Некорректный запрос", http.StatusBadRequest)
 	})
+
+	// pprof на отдельном порту, чтобы эндпоинты не закрывались AuthMiddleware
+	go func() {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/heap", pprof.Handler("heap").ServeHTTP)
+		mux.HandleFunc("/debug/pprof/goroutine", pprof.Handler("goroutine").ServeHTTP)
+		logger.Log.Debug("pprof listening on :6060")
+		if err := http.ListenAndServe(":6060", mux); err != nil {
+			logger.Log.Error("pprof server failed", zap.Error(err))
+		}
+	}()
 
 	if err := http.ListenAndServe(cfg.ServerAddr, r); err != nil {
 		return err

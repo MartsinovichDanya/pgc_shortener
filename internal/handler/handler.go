@@ -113,7 +113,7 @@ func (h *ShortenerHandler) CreateShortLink(w http.ResponseWriter, r *http.Reques
 				http.Error(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
 				return
 			}
-			fullShortURL := fmt.Sprintf("%s/%s", h.BaseURL, existingShort)
+			fullShortURL := joinShortURL(h.BaseURL, existingShort)
 			w.Header().Set("Content-Type", "text/plain")
 			w.WriteHeader(http.StatusConflict)
 			fmt.Fprint(w, fullShortURL)
@@ -124,7 +124,7 @@ func (h *ShortenerHandler) CreateShortLink(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	shortURL := fmt.Sprintf("%s/%s", h.BaseURL, id)
+	shortURL := joinShortURL(h.BaseURL, id)
 
 	h.auditObserver.Notify(audit.NewEvent(audit.ActionShorten, userID, originalURL))
 
@@ -177,7 +177,7 @@ func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
 				writeJSONError(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
 				return
 			}
-			fullShortURL := fmt.Sprintf("%s/%s", h.BaseURL, existingShort)
+			fullShortURL := joinShortURL(h.BaseURL, existingShort)
 			resp := model.Response{Result: fullShortURL}
 			jsonResp, errMarshal := easyjson.Marshal(resp)
 			if errMarshal != nil {
@@ -195,7 +195,7 @@ func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	shortURL := fmt.Sprintf("%s/%s", h.BaseURL, id)
+	shortURL := joinShortURL(h.BaseURL, id)
 	resp := model.Response{Result: shortURL}
 	jsonResp, err := easyjson.Marshal(resp)
 	if err != nil {
@@ -324,7 +324,7 @@ func (h *ShortenerHandler) ShortenBatch(w http.ResponseWriter, r *http.Request) 
 
 	resp := make([]model.BatchResponseItem, 0, len(corrList))
 	for _, c := range corrList {
-		shortURL := fmt.Sprintf("%s/%s", h.BaseURL, c.shortID)
+		shortURL := joinShortURL(h.BaseURL, c.shortID)
 		resp = append(resp, model.BatchResponseItem{
 			CorrelationID: c.correlationID,
 			ShortURL:      shortURL,
@@ -362,7 +362,7 @@ func (h *ShortenerHandler) UserURLs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for i := range urls {
-		urls[i].ShortURL = fmt.Sprintf("%s/%s", h.BaseURL, urls[i].ShortURL)
+		urls[i].ShortURL = joinShortURL(h.BaseURL, urls[i].ShortURL)
 	}
 
 	if len(urls) == 0 {
@@ -488,9 +488,22 @@ func writeJSONError(w http.ResponseWriter, message string, code int) {
 
 // isValidURL проверяет, что строка является валидным HTTP(S) URL.
 func isValidURL(raw string) bool {
+	if !strings.HasPrefix(raw, "http://") && !strings.HasPrefix(raw, "https://") {
+		return false
+	}
 	parsed, err := url.ParseRequestURI(raw)
 	if err != nil {
 		return false
 	}
 	return parsed.Scheme == "http" || parsed.Scheme == "https"
+}
+
+// joinShortURL склеивает baseURL и id без reflect-магии fmt.Sprintf.
+func joinShortURL(baseURL, id string) string {
+	var sb strings.Builder
+	sb.Grow(len(baseURL) + 1 + len(id))
+	sb.WriteString(baseURL)
+	sb.WriteByte('/')
+	sb.WriteString(id)
+	return sb.String()
 }

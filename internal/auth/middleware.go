@@ -74,16 +74,23 @@ func AuthMiddleware(secret string) func(http.Handler) http.Handler {
 
 // signUserID возвращает строку вида "userID:HMAC-SHA256(userID, secret)".
 func signUserID(userID, secret string) string {
-	mac := hmac.New(sha256.New, []byte(secret))
+	secretBytes := []byte(secret)
+	mac := hmac.New(sha256.New, secretBytes)
 	mac.Write([]byte(userID))
-	sig := hex.EncodeToString(mac.Sum(nil))
-	return userID + ":" + sig
+	sum := mac.Sum(nil) // 32 байта в буфере hash — одна аллокация
+	sig := make([]byte, hex.EncodedLen(len(sum)))
+	hex.Encode(sig, sum)
+	return userID + ":" + string(sig) // одна конкатенация вместо промежуточных строк
 }
 
-// validSignature проверяет подпись.
+// validSignature проверяет подпись без hex-строки expected.
 func validSignature(userID, signature, secret string) bool {
-	expectedMAC := hmac.New(sha256.New, []byte(secret))
-	expectedMAC.Write([]byte(userID))
-	expectedSig := hex.EncodeToString(expectedMAC.Sum(nil))
-	return hmac.Equal([]byte(signature), []byte(expectedSig))
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(userID))
+	sum := mac.Sum(nil)
+	sigBytes, err := hex.DecodeString(signature)
+	if err != nil || len(sigBytes) != len(sum) {
+		return false
+	}
+	return hmac.Equal(sigBytes, sum)
 }
