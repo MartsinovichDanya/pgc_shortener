@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	_ "net/http/pprof"
 	"time"
 
 	"github.com/MartsinovichDanya/pgc_shortener/internal/audit"
