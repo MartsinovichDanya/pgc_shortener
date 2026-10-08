@@ -25,8 +25,3 @@ type UserURL struct {
 	ShortURL    string `json:"short_url"`
 	OriginalURL string `json:"original_url"`
 }
-
-type deleteRequest struct {
-	userID  string
-	shortID string
-}
