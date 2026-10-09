@@ -43,14 +43,6 @@ git fetch template && git checkout template/v2 .github
 - **Hexagonal Architecture**
 - **Layered Architecture**
 
-
-
-
-File: ___go_build_shortener_.exe
-Build ID: C:\Users\Danya\AppData\Local\JetBrains\GoLand2026.2\tmp\GoLand\___go_build_shortener_.exe2026-10-08 22:55:59.601582 +0300 MSK
-Type: inuse_space
-Time: 2026-10-08 23:07:09 MSK
-Showing nodes accounting for 6196.39kB, 100% of 6196.39kB total
 flat  flat%   sum%        cum   cum%
 1536.51kB 24.80% 24.80%  1536.51kB 24.80%  go.uber.org/zap/zapcore.newCounters (inline)
 1465.54kB 23.65% 48.45%  1465.54kB 23.65%  compress/flate.newFastEnc (inline)

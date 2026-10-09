@@ -80,7 +80,7 @@ func (h *ShortenerHandler) Shutdown() {
 // @Produce      text/plain
 // @Param        url body string true "Оригинальный URL"
 // @Success      201 {string} string "Короткая ссылка"
-// @Success      409 {string} string "URL уже существует"
+// @Failure      409 {string} string "URL уже существует"
 // @Failure      400 {string} string "Некорректный запрос"
 // @Failure      500 {string} string "Внутренняя ошибка сервера"
 // @Router       / [post]
@@ -150,7 +150,7 @@ func (h *ShortenerHandler) CreateShortLink(w http.ResponseWriter, r *http.Reques
 // @Produce      json
 // @Param        request body model.Request true "Запрос"
 // @Success      201 {object} model.Response
-// @Success      409 {object} model.Response "URL уже существует"
+// @Failure      409 {object} model.Response "URL уже существует"
 // @Failure      400 {object} model.ErrorResponse
 // @Failure      500 {object} model.ErrorResponse
 // @Router       /api/shorten [post]

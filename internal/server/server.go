@@ -49,7 +49,12 @@ func Run() error {
 		auditSubject := audit.NewSubject(4096)
 
 		if cfg.AuditFile != "" {
-			auditSubject.Attach(audit.NewFileObserver(cfg.AuditFile))
+			fo, err := audit.NewFileObserver(cfg.AuditFile)
+			if err != nil {
+				logger.Log.Fatal("audit: cannot open file", zap.Error(err))
+			}
+			defer fo.Close()
+			auditSubject.Attach(fo)
 		}
 
 		if cfg.AuditURL != "" {

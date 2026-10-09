@@ -25,7 +25,7 @@ const (
 	testMaxBodySize  = 2048
 	testIDLength     = 8
 	testUseDB        = false
-	testCookieSecret = "test-secret-key"
+	testCookieSecret = "secret123"
 )
 
 // testRequest выполняет HTTP-запрос к тестовому серверу и возвращает ответ и тело.
