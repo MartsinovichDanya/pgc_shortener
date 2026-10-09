@@ -73,7 +73,17 @@ func (h *ShortenerHandler) Shutdown() {
 	})
 }
 
-// CreateShortLink обрабатывает POST / – создание короткой ссылки.
+// CreateShortLink godoc
+// @Summary      Создать короткую ссылку
+// @Tags         links
+// @Accept       text/plain
+// @Produce      text/plain
+// @Param        url body string true "Оригинальный URL"
+// @Success      201 {string} string "Короткая ссылка"
+// @Success      409 {string} string "URL уже существует"
+// @Failure      400 {string} string "Некорректный запрос"
+// @Failure      500 {string} string "Внутренняя ошибка сервера"
+// @Router       / [post]
 func (h *ShortenerHandler) CreateShortLink(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, int64(h.MaxBodySize)))
 	if err != nil {
@@ -133,7 +143,17 @@ func (h *ShortenerHandler) CreateShortLink(w http.ResponseWriter, r *http.Reques
 	fmt.Fprint(w, shortURL)
 }
 
-// ShortenAPI обрабатывает POST /api/shorten – создание короткой ссылки через JSON.
+// ShortenAPI godoc
+// @Summary      Создать короткую ссылку (JSON)
+// @Tags         links
+// @Accept       json
+// @Produce      json
+// @Param        request body model.Request true "Запрос"
+// @Success      201 {object} model.Response
+// @Success      409 {object} model.Response "URL уже существует"
+// @Failure      400 {object} model.ErrorResponse
+// @Failure      500 {object} model.ErrorResponse
+// @Router       /api/shorten [post]
 func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, int64(h.MaxBodySize)))
 	if err != nil {
@@ -210,7 +230,14 @@ func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(jsonResp)
 }
 
-// Redirect обрабатывает GET /{id} – перенаправление на оригинальный URL.
+// Redirect godoc
+// @Summary      Редирект на оригинальный URL
+// @Tags         links
+// @Param        id path string true "Короткий идентификатор"
+// @Success      307 "Temporary Redirect"
+// @Failure      400 {string} string "Некорректный запрос"
+// @Failure      410 {string} string "Ссылка удалена"
+// @Router       /{id} [get]
 func (h *ShortenerHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	originalURL, err := h.Store.Get(r.Context(), id)
@@ -233,7 +260,12 @@ func (h *ShortenerHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusTemporaryRedirect)
 }
 
-// PingHandler обрабатывает GET /ping – проверка соединения с БД (если используется).
+// PingHandler godoc
+// @Summary      Проверка соединения с БД
+// @Tags         system
+// @Success      200 "OK"
+// @Failure      500 {string} string "Database ping failed"
+// @Router       /ping [get]
 func (h *ShortenerHandler) PingHandler(w http.ResponseWriter, r *http.Request) {
 	if !h.UseDB {
 		w.WriteHeader(http.StatusOK)
@@ -257,7 +289,16 @@ func (h *ShortenerHandler) PingHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// ShortenBatch обрабатывает POST /api/shorten/batch – массовое создание коротких ссылок.
+// ShortenBatch godoc
+// @Summary      Массовое создание коротких ссылок
+// @Tags         links
+// @Accept       json
+// @Produce      json
+// @Param        request body []model.BatchRequestItem true "Список URL"
+// @Success      201 {array} model.BatchResponseItem
+// @Failure      400 {object} model.ErrorResponse
+// @Failure      500 {object} model.ErrorResponse
+// @Router       /api/shorten/batch [post]
 func (h *ShortenerHandler) ShortenBatch(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, int64(h.MaxBodySize)))
 	if err != nil {
@@ -338,7 +379,16 @@ func (h *ShortenerHandler) ShortenBatch(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-// UserURLs обрабатывает GET /api/user/urls – возвращает все ссылки пользователя.
+// UserURLs godoc
+// @Summary      Получить ссылки пользователя
+// @Tags         user
+// @Security     CookieAuth
+// @Produce      json
+// @Success      200 {array} model.UserURL
+// @Success      204 "Нет ссылок"
+// @Failure      401 {object} model.ErrorResponse
+// @Failure      500 {object} model.ErrorResponse
+// @Router       /api/user/urls [get]
 func (h *ShortenerHandler) UserURLs(w http.ResponseWriter, r *http.Request) {
 	// Если при проверке куки был обнаружен невалидный токен – 401
 	if invalid, ok := r.Context().Value(auth.TokenInvalidKey).(bool); ok && invalid {
@@ -377,7 +427,17 @@ func (h *ShortenerHandler) UserURLs(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// DeleteUserURLs обрабатывает DELETE /api/user/urls.
+// DeleteUserURLs godoc
+// @Summary      Удалить ссылки пользователя
+// @Tags         user
+// @Security     CookieAuth
+// @Accept       json
+// @Produce      json
+// @Param        request body []string true "Список коротких идентификаторов"
+// @Success      202 "Принято"
+// @Failure      400 {object} model.ErrorResponse
+// @Failure      401 {object} model.ErrorResponse
+// @Router       /api/user/urls [delete]
 func (h *ShortenerHandler) DeleteUserURLs(w http.ResponseWriter, r *http.Request) {
 	// Если токен был невалиден – сразу 401, как в UserURLs
 	if invalid, ok := r.Context().Value(auth.TokenInvalidKey).(bool); ok && invalid {

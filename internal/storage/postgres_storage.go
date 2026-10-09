@@ -16,13 +16,38 @@ import (
 	"github.com/MartsinovichDanya/pgc_shortener/internal/utils"
 )
 
+// migrationsFS встраивает SQL-миграции в бинарник.
+// Файлы лежат в ./migrations/*.sql и применяются автоматически
+// при создании PostgresStore через goose.
+//
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
+// PostgresStore — реализация Store на базе PostgreSQL (pgxpool).
+//
+// Все запросы выполняются через пул соединений, безопасный для
+// параллельного использования. Удаление ссылок реализовано как мягкое:
+// столбец is_deleted помечается TRUE, запись остаётся в таблице,
+// но перестаёт возвращаться в Get, GetByOriginalURL и GetUserURLs.
+//
+// Схема БД создаётся/обновляется автоматически при вызове
+// NewPostgresStore (через встроенные миграции goose).
 type PostgresStore struct {
 	pool *pgxpool.Pool
 }
 
+// NewPostgresStore создаёт PostgresStore и применяет миграции.
+//
+// databaseURL — строка подключения в формате, который понимает pgx
+// (например, postgres://user:pass@host:5432/db?sslmode=disable).
+//
+// При создании:
+//  1. создаётся пул соединений pgxpool;
+//  2. последовательно применяются встроенные миграции из ./migrations
+//     (goose.Up, идемпотентно — уже применённые пропускаются).
+//
+// Если миграции не применились, пул закрывается и возвращается ошибка,
+// чтобы не оставлять висящих соединений.
 func NewPostgresStore(databaseURL string) (Store, error) {
 	pool, err := pgxpool.New(context.Background(), databaseURL)
 	if err != nil {
@@ -37,6 +62,11 @@ func NewPostgresStore(databaseURL string) (Store, error) {
 	return &PostgresStore{pool: pool}, nil
 }
 
+// runMigrations применяет встроенные SQL-миграции через goose.
+//
+// Открывает отдельное подключение database/sql поверх драйвера "pgx"
+// (это требование goose), устанавливает в качестве источника миграций
+// migrationsFS и вызывает goose.Up. Соединение закрывается по завершении.
 func runMigrations(databaseURL string) error {
 	db, err := sql.Open("pgx", databaseURL)
 	if err != nil {
@@ -53,6 +83,12 @@ func runMigrations(databaseURL string) error {
 }
 
 // Save сохраняет короткую ссылку с привязкой к пользователю.
+//
+// Использует INSERT ... ON CONFLICT (original_url) DO NOTHING: если
+// originalURL уже присутствует в таблице (в том числе как мягко удалённая
+// запись), вставка не происходит и возвращается ErrURLExists.
+// Вызывающий код в этом случае должен получить существующий shortID
+// через GetByOriginalURL.
 func (s *PostgresStore) Save(ctx context.Context, id, originalURL, userID string) error {
 	uuid := utils.NewUUID()
 	query := `
@@ -70,8 +106,16 @@ func (s *PostgresStore) Save(ctx context.Context, id, originalURL, userID string
 	return nil
 }
 
-// SaveBatch сохраняет множество ссылок в одной транзакции с привязкой к пользователю.
-// Используется pgx.Batch для отправки всех INSERT одним сообщением.
+// SaveBatch сохраняет множество ссылок в одной транзакции с привязкой
+// к пользователю.
+//
+// Все INSERT отправляются одним сообщением через pgx.Batch, что снижает
+// число round-trip к БД. Транзакция атомарна: если хотя бы один запрос
+// из батча завершится ошибкой, изменения откатываются.
+//
+// Конфликты по original_url обрабатываются через ON CONFLICT DO NOTHING
+// (аналогично Save); факт конфликта при этом не возвращается — метод
+// считает операцию успешной.
 func (s *PostgresStore) SaveBatch(ctx context.Context, records map[string]string, userID string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -111,6 +155,11 @@ func (s *PostgresStore) SaveBatch(ctx context.Context, records map[string]string
 }
 
 // Get возвращает оригинальный URL по сокращённому идентификатору.
+//
+// Если запись не найдена, возвращает обёрнутую pgx.ErrNoRows —
+// вызывающий код может отличить «нет записи» через errors.Is.
+// Если запись помечена is_deleted = TRUE, возвращает ErrURLDeleted,
+// на который handler отвечает 410 Gone.
 func (s *PostgresStore) Get(ctx context.Context, id string) (string, error) {
 	var originalURL string
 	var isDeleted bool
@@ -131,6 +180,10 @@ func (s *PostgresStore) Get(ctx context.Context, id string) (string, error) {
 }
 
 // GetByOriginalURL возвращает короткий идентификатор по оригинальному URL.
+//
+// Мягко удалённые записи (is_deleted = TRUE) не возвращаются: по ним
+// вернётся ошибка «не найден». Используется в handler при обработке
+// конфликта ErrURLExists, чтобы вернуть клиенту уже существующую ссылку.
 func (s *PostgresStore) GetByOriginalURL(ctx context.Context, originalURL string) (string, error) {
 	var shortURL string
 	err := s.pool.QueryRow(ctx,
@@ -146,7 +199,10 @@ func (s *PostgresStore) GetByOriginalURL(ctx context.Context, originalURL string
 	return shortURL, nil
 }
 
-// GetUserURLs возвращает все когда-либо сокращённые пользователем ссылки.
+// GetUserURLs возвращает все неудалённые ссылки, принадлежащие пользователю.
+//
+// Возвращает nil-slice без ошибки, если у пользователя нет ссылок.
+// Порядок строк определяется БД и не гарантирован.
 func (s *PostgresStore) GetUserURLs(ctx context.Context, userID string) ([]model.UserURL, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT short_url, original_url FROM service_data.urls 
@@ -176,7 +232,14 @@ func (s *PostgresStore) GetUserURLs(ctx context.Context, userID string) ([]model
 	return urls, nil
 }
 
-// BatchDelete помечает несколько сокращённых ссылок как удалённые одним запросом.
+// BatchDelete помечает несколько сокращённых ссылок как удалённые.
+//
+// Обновление выполняется в одной транзакции: либо все переданные ссылки
+// будут помечены, либо ни одна. В UPDATE есть условие user_id = $2,
+// поэтому пользователь может удалять только свои ссылки; чужие
+// идентификаторы молча игнорируются (rows affected = 0).
+//
+// Пустой список shortURLs — no-op.
 func (s *PostgresStore) BatchDelete(ctx context.Context, shortURLs []string, userID string) error {
 	if len(shortURLs) == 0 {
 		return nil
@@ -206,11 +269,17 @@ func (s *PostgresStore) BatchDelete(ctx context.Context, shortURLs []string, use
 }
 
 // Ping проверяет доступность базы данных.
+//
+// Используется HTTP-обработчиком /ping. Реализует интерфейс storage.Pinger.
 func (s *PostgresStore) Ping(ctx context.Context) error {
 	return s.pool.Ping(ctx)
 }
 
-// Close закрывает пул соединений.
+// Close закрывает пул соединений pgxpool.
+//
+// После вызова Close все методы PostgresStore становятся непригодны
+// к использованию — попытки обращений вернут ошибку от pgxpool.
+// Следует вызывать при завершении приложения.
 func (s *PostgresStore) Close() {
 	s.pool.Close()
 }

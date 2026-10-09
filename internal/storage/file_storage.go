@@ -1,3 +1,13 @@
+// Package storage предоставляет абстракцию хранилища сокращённых ссылок.
+//
+// Пакет определяет интерфейс Store и две его реализации:
+//   - FileStore — потокобезопасное in-memory хранилище с опциональной
+//     персистентностью в файл (по одной JSON-записи на строку);
+//   - PostgresStore — хранилище на базе PostgreSQL.
+//
+// Обе реализации возвращают одинаковые sentinel-ошибки (ErrURLExists,
+// ErrURLDeleted), поэтому вызывающий код может проверять их через errors.Is
+// независимо от выбранного бэкенда.
 package storage
 
 import (
@@ -13,24 +23,46 @@ import (
 )
 
 // Record представляет одну запись в хранилище.
+//
+// Используется FileStore для сериализации состояния в JSON-файл
+// (одна запись — одна строка). Поле IsDeleted реализует мягкое удаление:
+// запись остаётся в файле, но перестаёт возвращаться в Get и GetUserURLs.
 type Record struct {
-	UUID        string `json:"uuid"`
-	ShortURL    string `json:"short_url"`
-	OriginalURL string `json:"original_url"`
-	UserID      string `json:"user_id"`
-	IsDeleted   bool   `json:"is_deleted"`
+	UUID        string `json:"uuid"`         // Уникальный идентификатор записи
+	ShortURL    string `json:"short_url"`    // Короткий идентификатор ссылки
+	OriginalURL string `json:"original_url"` // Оригинальный URL
+	UserID      string `json:"user_id"`      // Владелец ссылки (может быть пустым для анонимных)
+	IsDeleted   bool   `json:"is_deleted"`   // Признак мягкого удаления
 }
 
-// FileStore – потокобезопасное in-memory хранилище сокращённых URL с сохранением в файл.
+// FileStore — потокобезопасное in-memory хранилище сокращённых URL
+// с опциональным сохранением в файл.
+//
+// Все операции чтения защищены RWMutex, все операции записи — Lock.
+// Если filename пустой, хранилище работает только в памяти и не
+// переживает перезапуск процесса.
+//
+// FileStore реализует интерфейс Store.
 type FileStore struct {
 	mu            sync.RWMutex
-	data          map[string]Record
-	originalIndex map[string]string
-	filename      string
+	data          map[string]Record // shortID -> запись
+	originalIndex map[string]string // originalURL -> shortID (для O(1) проверки дубликатов)
+	filename      string            // путь к файлу персистентности; пусто — только память
 }
 
-// NewFileStore создаёт новый экземпляр FileStore, реализующий Store.
-// Если передан путь к файлу, данные загружаются из него; иначе – только в памяти.
+// NewFileStore создаёт новый экземпляр FileStore.
+//
+// Если filename задан и файл существует, его содержимое загружается
+// в память: каждая непустая строка файла должна быть валидным JSON-объектом
+// Record. Если файл не существует, возвращается пустое хранилище без ошибки
+// (файл будет создан при первой записи).
+//
+// Параметр filename вариативный: NewFileStore() создаёт чисто in-memory
+// хранилище. Передавать больше одного пути не имеет смысла — используются
+// только первый элемент.
+//
+// Возвращает ошибку, если файл не удалось открыть, прочитать или
+// разобрать хотя бы одну строку.
 func NewFileStore(filename ...string) (Store, error) {
 	s := &FileStore{
 		data:          make(map[string]Record),
@@ -71,6 +103,14 @@ func NewFileStore(filename ...string) (Store, error) {
 }
 
 // Save сохраняет пару (короткий идентификатор, оригинальный URL) для пользователя userID.
+//
+// Если originalURL уже присутствует в хранилище (включая мягко удалённые
+// записи), возвращает ErrURLExists — вызывающий код должен в этом случае
+// получить существующий shortID через GetByOriginalURL.
+//
+// При наличии filename запись атомарно дописывается в конец файла.
+// Контекст используется для совместимости с интерфейсом Store; FileStore
+// его не проверяет.
 func (s *FileStore) Save(ctx context.Context, id, originalURL, userID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -98,7 +138,14 @@ func (s *FileStore) Save(ctx context.Context, id, originalURL, userID string) er
 	return nil
 }
 
-// SaveBatch сохраняет множество пар (id, originalURL) за одну операцию для пользователя userID.
+// SaveBatch сохраняет множество пар (id, originalURL) за одну операцию
+// для пользователя userID.
+//
+// Вставка атомарна с точки зрения вызывающего: если хотя бы один originalURL
+// уже присутствует в хранилище или повторяется внутри самого батча,
+// ни одна запись не сохраняется и возвращается ErrURLExists.
+//
+// При наличии filename все новые записи дописываются в файл одной серией.
 func (s *FileStore) SaveBatch(ctx context.Context, records map[string]string, userID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -151,9 +198,17 @@ func (s *FileStore) SaveBatch(ctx context.Context, records map[string]string, us
 }
 
 // BatchDelete помечает несколько ссылок как удалённые.
-// Пользователь может удалять только свои ссылки.
-// Обратный индекс не изменяется: он по-прежнему хранит соответствие originalURL -> shortURL
-// для проверки дубликатов (включая удалённые), что соответствует поведению PostgresStore.
+//
+// Пользователь может удалять только свои ссылки: записи, не принадлежащие
+// userID, а также отсутствующие в хранилище, молча игнорируются — ошибка
+// при этом не возвращается. Пустой список shortURLs — no-op.
+//
+// Обратный индекс originalURL -> shortID не изменяется: он по-прежнему
+// хранит соответствие для проверки дубликатов (включая удалённые),
+// что соответствует поведению PostgresStore. Это означает, что повторное
+// сокращение того же originalURL после удаления вернёт ErrURLExists.
+//
+// При наличии filename файл полностью перезаписывается текущим состоянием.
 func (s *FileStore) BatchDelete(ctx context.Context, shortURLs []string, userID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -180,7 +235,11 @@ func (s *FileStore) BatchDelete(ctx context.Context, shortURLs []string, userID 
 	return nil
 }
 
-// Get возвращает оригинальный URL по идентификатору (только для неудалённых записей).
+// Get возвращает оригинальный URL по идентификатору.
+//
+// Если запись не найдена, возвращает обычную ошибку (не sentinel).
+// Если запись помечена как удалённая, возвращает ErrURLDeleted — вызывающий
+// код должен ответить клиенту 410 Gone.
 func (s *FileStore) Get(ctx context.Context, id string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -195,8 +254,11 @@ func (s *FileStore) Get(ctx context.Context, id string) (string, error) {
 	return record.OriginalURL, nil
 }
 
-// GetByOriginalURL возвращает короткий идентификатор по оригинальному URL (только для неудалённых записей).
-// Использует обратный индекс для O(1) поиска.
+// GetByOriginalURL возвращает короткий идентификатор по оригинальному URL.
+//
+// Использует обратный индекс originalIndex, поэтому работает за O(1).
+// Мягко удалённые записи не возвращаются: если запись помечена IsDeleted,
+// функция вернёт ошибку «не найден».
 func (s *FileStore) GetByOriginalURL(ctx context.Context, originalURL string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -212,7 +274,11 @@ func (s *FileStore) GetByOriginalURL(ctx context.Context, originalURL string) (s
 	return shortID, nil
 }
 
-// GetUserURLs возвращает все сокращённые пользователем ссылки (исключая удалённые).
+// GetUserURLs возвращает все сокращённые пользователем ссылки,
+// исключая мягко удалённые.
+//
+// Если у пользователя нет ссылок, возвращается nil-slice без ошибки.
+// Порядок элементов не определён (обход map).
 func (s *FileStore) GetUserURLs(ctx context.Context, userID string) ([]model.UserURL, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -229,7 +295,8 @@ func (s *FileStore) GetUserURLs(ctx context.Context, userID string) ([]model.Use
 	return result, nil
 }
 
-// appendRecord дописывает запись в конец файла.
+// appendRecord дописывает одну запись в конец файла в виде JSON-строки.
+// Вызывается под уже взятым s.mu.
 func (s *FileStore) appendRecord(rec Record) error {
 	file, err := os.OpenFile(s.filename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
 	if err != nil {
@@ -249,6 +316,9 @@ func (s *FileStore) appendRecord(rec Record) error {
 }
 
 // writeAll полностью перезаписывает файл хранилища текущим содержимым map.
+// Используется после операций, меняющих существующие записи (например,
+// BatchDelete), когда дозапись в конец файла невозможна.
+// Вызывается под уже взятым s.mu.
 func (s *FileStore) writeAll() error {
 	file, err := os.OpenFile(s.filename, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
