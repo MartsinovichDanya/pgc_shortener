@@ -1,0 +1,251 @@
+basePath: /
+definitions:
+  github_com_MartsinovichDanya_pgc_shortener_internal_model.BatchRequestItem:
+    properties:
+      correlation_id:
+        example: "1"
+        type: string
+      original_url:
+        example: https://example.com
+        type: string
+    type: object
+  github_com_MartsinovichDanya_pgc_shortener_internal_model.BatchResponseItem:
+    properties:
+      correlation_id:
+        example: "1"
+        type: string
+      short_url:
+        example: http://localhost:8080/abc123
+        type: string
+    type: object
+  github_com_MartsinovichDanya_pgc_shortener_internal_model.ErrorResponse:
+    properties:
+      error:
+        example: Некорректный URL
+        type: string
+    type: object
+  github_com_MartsinovichDanya_pgc_shortener_internal_model.Request:
+    properties:
+      url:
+        example: https://example.com
+        type: string
+    type: object
+  github_com_MartsinovichDanya_pgc_shortener_internal_model.Response:
+    properties:
+      result:
+        example: http://localhost:8080/abc123
+        type: string
+    type: object
+  github_com_MartsinovichDanya_pgc_shortener_internal_model.UserURL:
+    properties:
+      original_url:
+        example: https://example.com
+        type: string
+      short_url:
+        example: http://localhost:8080/abc123
+        type: string
+    type: object
+info:
+  contact: {}
+  description: API сервиса сокращения ссылок.
+  title: PGC Shortener API
+  version: "1.0"
+paths:
+  /:
+    post:
+      consumes:
+      - text/plain
+      parameters:
+      - description: Оригинальный URL
+        in: body
+        name: url
+        required: true
+        schema:
+          type: string
+      produces:
+      - text/plain
+      responses:
+        "201":
+          description: Короткая ссылка
+          schema:
+            type: string
+        "400":
+          description: Некорректный запрос
+          schema:
+            type: string
+        "409":
+          description: URL уже существует
+          schema:
+            type: string
+        "500":
+          description: Внутренняя ошибка сервера
+          schema:
+            type: string
+      summary: Создать короткую ссылку
+      tags:
+      - links
+  /{id}:
+    get:
+      parameters:
+      - description: Короткий идентификатор
+        in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "307":
+          description: Temporary Redirect
+        "400":
+          description: Некорректный запрос
+          schema:
+            type: string
+        "410":
+          description: Ссылка удалена
+          schema:
+            type: string
+      summary: Редирект на оригинальный URL
+      tags:
+      - links
+  /api/shorten:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Запрос
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/github_com_MartsinovichDanya_pgc_shortener_internal_model.Request'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/github_com_MartsinovichDanya_pgc_shortener_internal_model.Response'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/github_com_MartsinovichDanya_pgc_shortener_internal_model.ErrorResponse'
+        "409":
+          description: URL уже существует
+          schema:
+            $ref: '#/definitions/github_com_MartsinovichDanya_pgc_shortener_internal_model.Response'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/github_com_MartsinovichDanya_pgc_shortener_internal_model.ErrorResponse'
+      summary: Создать короткую ссылку (JSON)
+      tags:
+      - links
+  /api/shorten/batch:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Список URL
+        in: body
+        name: request
+        required: true
+        schema:
+          items:
+            $ref: '#/definitions/github_com_MartsinovichDanya_pgc_shortener_internal_model.BatchRequestItem'
+          type: array
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            items:
+              $ref: '#/definitions/github_com_MartsinovichDanya_pgc_shortener_internal_model.BatchResponseItem'
+            type: array
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/github_com_MartsinovichDanya_pgc_shortener_internal_model.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/github_com_MartsinovichDanya_pgc_shortener_internal_model.ErrorResponse'
+      summary: Массовое создание коротких ссылок
+      tags:
+      - links
+  /api/user/urls:
+    delete:
+      consumes:
+      - application/json
+      parameters:
+      - description: Список коротких идентификаторов
+        in: body
+        name: request
+        required: true
+        schema:
+          items:
+            type: string
+          type: array
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Принято
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/github_com_MartsinovichDanya_pgc_shortener_internal_model.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/github_com_MartsinovichDanya_pgc_shortener_internal_model.ErrorResponse'
+      security:
+      - CookieAuth: []
+      summary: Удалить ссылки пользователя
+      tags:
+      - user
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/github_com_MartsinovichDanya_pgc_shortener_internal_model.UserURL'
+            type: array
+        "204":
+          description: Нет ссылок
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/github_com_MartsinovichDanya_pgc_shortener_internal_model.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/github_com_MartsinovichDanya_pgc_shortener_internal_model.ErrorResponse'
+      security:
+      - CookieAuth: []
+      summary: Получить ссылки пользователя
+      tags:
+      - user
+  /ping:
+    get:
+      responses:
+        "200":
+          description: OK
+        "500":
+          description: Database ping failed
+          schema:
+            type: string
+      summary: Проверка соединения с БД
+      tags:
+      - system
+schemes:
+- http
+- https
+securityDefinitions:
+  CookieAuth:
+    in: cookie
+    name: user_token
+    type: apiKey
+swagger: "2.0"

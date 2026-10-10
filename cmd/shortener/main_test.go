@@ -25,10 +25,12 @@ const (
 	testMaxBodySize  = 2048
 	testIDLength     = 8
 	testUseDB        = false
-	testCookieSecret = "test-secret-key-32-bytes-long!!"
+	testCookieSecret = "secret123"
 )
 
 // testRequest выполняет HTTP-запрос к тестовому серверу и возвращает ответ и тело.
+//
+//bodyclose:handled
 func testRequest(t *testing.T, ts *httptest.Server, method, path string, body io.Reader) (*http.Response, string) {
 	t.Helper()
 	req, err := http.NewRequest(method, ts.URL+path, body)
@@ -52,6 +54,8 @@ func testRequest(t *testing.T, ts *httptest.Server, method, path string, body io
 }
 
 // testRequestWithCookie выполняет запрос с предустановленной кукой.
+//
+//bodyclose:handled
 func testRequestWithCookie(t *testing.T, ts *httptest.Server, method, path string, body io.Reader, cookie *http.Cookie) (*http.Response, string) {
 	t.Helper()
 	req, err := http.NewRequest(method, ts.URL+path, body)
@@ -98,8 +102,18 @@ func getIDFromResponse(t *testing.T, body string) string {
 }
 
 // newTestRouter создаёт chi.Router с middleware аутентификации.
-func newTestRouter(store storage.Store) http.Handler {
-	h := handler.NewShortenerHandler(store, testBaseURL, testMaxBodySize, testIDLength, testUseDB)
+// Возвращает роутер и хендлер, чтобы вызывающая сторона могла корректно
+// освободить ресурсы (закрыть сервер и остановить фоновый воркер).
+func newTestRouter(store storage.Store) (http.Handler, *handler.ShortenerHandler) {
+	// nil → конструктор подменит на audit.NoopNotifier{} (аудит выключен).
+	h := handler.NewShortenerHandler(
+		store,
+		testBaseURL,
+		testMaxBodySize,
+		testIDLength,
+		testUseDB,
+		nil,
+	)
 
 	r := chi.NewRouter()
 	r.Use(auth.AuthMiddleware(testCookieSecret))
@@ -118,15 +132,27 @@ func newTestRouter(store storage.Store) http.Handler {
 		http.Error(w, "Некорректный запрос", http.StatusBadRequest)
 	})
 
-	return r
+	return r, h
+}
+
+// newTestServer поднимает тестовый сервер и регистрирует очистку:
+// сначала закрываем httptest.Server, затем останавливаем фоновый воркер хендлера.
+func newTestServer(t *testing.T, store storage.Store) *httptest.Server {
+	t.Helper()
+	router, h := newTestRouter(store)
+	ts := httptest.NewServer(router)
+	t.Cleanup(func() {
+		ts.Close()
+		h.Shutdown()
+	})
+	return ts
 }
 
 // ---------- CreateShortLink ----------
 
 func TestCreateShortLink_ValidURL(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	originalURL := "https://example.com/path?q=1"
 	resp, body := testRequest(t, ts, http.MethodPost, "/", strings.NewReader(originalURL))
@@ -146,8 +172,7 @@ func TestCreateShortLink_ValidURL(t *testing.T) {
 
 func TestCreateShortLink_EmptyBody(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	resp, body := testRequest(t, ts, http.MethodPost, "/", strings.NewReader(""))
 
@@ -157,8 +182,7 @@ func TestCreateShortLink_EmptyBody(t *testing.T) {
 
 func TestCreateShortLink_InvalidURL(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	resp, body := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("not-a-valid-url"))
 
@@ -168,8 +192,7 @@ func TestCreateShortLink_InvalidURL(t *testing.T) {
 
 func TestCreateShortLink_BodyTruncation(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	longPath := strings.Repeat("a", 3000)
 	longURL := "http://example.com/" + longPath
@@ -194,8 +217,7 @@ func TestRedirect_ExistingID(t *testing.T) {
 	err := store.Save(context.Background(), id, originalURL, "test-user-id")
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	resp, _ := testRequest(t, ts, http.MethodGet, "/"+id, nil)
 
@@ -205,8 +227,7 @@ func TestRedirect_ExistingID(t *testing.T) {
 
 func TestRedirect_NonExistentID(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	resp, body := testRequest(t, ts, http.MethodGet, "/nonexistent", nil)
 
@@ -225,8 +246,7 @@ func TestRedirect_DeletedURL(t *testing.T) {
 	err = store.BatchDelete(context.Background(), []string{id}, "test-user-id")
 	require.NoError(t, err)
 
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	resp, _ := testRequest(t, ts, http.MethodGet, "/"+id, nil)
 	assert.Equal(t, http.StatusGone, resp.StatusCode)
@@ -236,8 +256,7 @@ func TestRedirect_DeletedURL(t *testing.T) {
 
 func TestShortenAPI_ValidURL(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	reqBody := `{"url":"https://example.com/api-test"}`
 	resp, body := testRequest(t, ts, http.MethodPost, "/api/shorten", strings.NewReader(reqBody))
@@ -262,8 +281,7 @@ func TestShortenAPI_ValidURL(t *testing.T) {
 
 func TestShortenAPI_EmptyURL(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	resp, body := testRequest(t, ts, http.MethodPost, "/api/shorten", strings.NewReader(`{"url":""}`))
 
@@ -273,8 +291,7 @@ func TestShortenAPI_EmptyURL(t *testing.T) {
 
 func TestShortenAPI_InvalidJSON(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	resp, body := testRequest(t, ts, http.MethodPost, "/api/shorten", strings.NewReader(`not json`))
 
@@ -286,8 +303,7 @@ func TestShortenAPI_InvalidJSON(t *testing.T) {
 
 func TestShortenBatch_ValidBatch(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	reqBody := `[
 		{"correlation_id":"1","original_url":"https://example.com/1"},
@@ -317,8 +333,7 @@ func TestShortenBatch_ValidBatch(t *testing.T) {
 
 func TestShortenBatch_EmptyBody(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	resp, _ := testRequest(t, ts, http.MethodPost, "/api/shorten/batch", strings.NewReader(""))
 
@@ -327,8 +342,7 @@ func TestShortenBatch_EmptyBody(t *testing.T) {
 
 func TestShortenBatch_InvalidJSON(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	resp, body := testRequest(t, ts, http.MethodPost, "/api/shorten/batch", strings.NewReader(`invalid`))
 
@@ -338,8 +352,7 @@ func TestShortenBatch_InvalidJSON(t *testing.T) {
 
 func TestShortenBatch_EmptyCorrelationID(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	reqBody := `[{"correlation_id":"","original_url":"https://example.com/1"}]`
 	resp, body := testRequest(t, ts, http.MethodPost, "/api/shorten/batch", strings.NewReader(reqBody))
@@ -352,8 +365,7 @@ func TestShortenBatch_EmptyCorrelationID(t *testing.T) {
 
 func TestUserURLs_NoURLs(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	resp, body := testRequest(t, ts, http.MethodGet, "/api/user/urls", nil)
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
@@ -362,8 +374,7 @@ func TestUserURLs_NoURLs(t *testing.T) {
 
 func TestUserURLs_WithURLs(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	resp1, _ := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/urls1"))
 	require.Equal(t, http.StatusCreated, resp1.StatusCode)
@@ -393,8 +404,7 @@ func TestUserURLs_WithURLs(t *testing.T) {
 
 func TestUserURLs_InvalidToken(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	invalidCookie := &http.Cookie{
 		Name:  "user_token",
@@ -409,8 +419,7 @@ func TestUserURLs_InvalidToken(t *testing.T) {
 
 func TestUserURLs_InvalidTokenSignature(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	userID := "test-user-id"
 	wrongSignature := "0123456789abcdef"
@@ -444,8 +453,7 @@ func waitForDeletion(t *testing.T, store storage.Store, id string, timeout time.
 
 func TestDeleteUserURLs_Success(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	respCreate, body := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/to-delete"))
 	require.Equal(t, http.StatusCreated, respCreate.StatusCode)
@@ -467,8 +475,7 @@ func TestDeleteUserURLs_Success(t *testing.T) {
 
 func TestDeleteUserURLs_InvalidToken(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	invalidCookie := &http.Cookie{
 		Name:  "user_token",
@@ -484,8 +491,7 @@ func TestDeleteUserURLs_InvalidToken(t *testing.T) {
 
 func TestDeleteUserURLs_EmptyBody(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	respCreate, _ := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/empty-body"))
 	require.Equal(t, http.StatusCreated, respCreate.StatusCode)
@@ -499,8 +505,7 @@ func TestDeleteUserURLs_EmptyBody(t *testing.T) {
 
 func TestDeleteUserURLs_InvalidJSON(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	respCreate, _ := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/invalid-json"))
 	require.Equal(t, http.StatusCreated, respCreate.StatusCode)
@@ -515,8 +520,7 @@ func TestDeleteUserURLs_InvalidJSON(t *testing.T) {
 
 func TestDeleteUserURLs_EmptyList(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	respCreate, _ := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/empty-list"))
 	require.Equal(t, http.StatusCreated, respCreate.StatusCode)
@@ -531,8 +535,7 @@ func TestDeleteUserURLs_EmptyList(t *testing.T) {
 
 func TestDeleteUserURLs_UserCannotDeleteOthers(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	resp1, body1 := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/user1-url"))
 	require.Equal(t, http.StatusCreated, resp1.StatusCode)
@@ -561,8 +564,7 @@ func TestDeleteUserURLs_UserCannotDeleteOthers(t *testing.T) {
 
 func TestServeHTTP_InvalidMethodOnRoot(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	resp, _ := testRequest(t, ts, http.MethodPut, "/", nil)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
@@ -570,8 +572,7 @@ func TestServeHTTP_InvalidMethodOnRoot(t *testing.T) {
 
 func TestServeHTTP_GetRootWithoutID(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	resp, _ := testRequest(t, ts, http.MethodGet, "/", nil)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
@@ -579,8 +580,7 @@ func TestServeHTTP_GetRootWithoutID(t *testing.T) {
 
 func TestServeHTTP_PostToInvalidPath(t *testing.T) {
 	store, _ := storage.NewFileStore()
-	ts := httptest.NewServer(newTestRouter(store))
-	defer ts.Close()
+	ts := newTestServer(t, store)
 
 	resp, _ := testRequest(t, ts, http.MethodPost, "/somepath", nil)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)

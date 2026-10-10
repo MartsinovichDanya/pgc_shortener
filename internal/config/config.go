@@ -17,6 +17,9 @@ type Config struct {
 	FileStoragePath string `env:"FILE_STORAGE_PATH"`
 	DatabaseDSN     string `env:"DATABASE_DSN"`
 	CookieSecret    string `env:"COOKIE_SECRET" envDefault:"secret123"`
+	AuditFile       string `env:"AUDIT_FILE"`
+	AuditURL        string `env:"AUDIT_URL"`
+	EnableAudit     bool
 	UseDB           bool
 }
 
@@ -24,7 +27,7 @@ type Config struct {
 func GetConfig() *Config {
 	var cfg Config
 	var flagServerAddr, flagBaseURL, flagFileStoragePath,
-		flagDatabaseDSN string
+		flagDatabaseDSN, flagAuditFile, flagAuditURL string
 
 	err := env.Parse(&cfg)
 	if err != nil {
@@ -34,7 +37,9 @@ func GetConfig() *Config {
 	flag.StringVar(&flagServerAddr, "a", "localhost:8080", "адрес запуска HTTP-сервера")
 	flag.StringVar(&flagBaseURL, "b", "http://localhost:8080", "базовый адрес результирующего сокращённого URL")
 	flag.StringVar(&flagFileStoragePath, "f", "storage.json", "путь к файлу-хранилищу")
-	flag.StringVar(&flagDatabaseDSN, "d", "", "Строка подключения в БД")
+	flag.StringVar(&flagDatabaseDSN, "d", "", "строка подключения в БД")
+	flag.StringVar(&flagAuditFile, "audit-file", "", "путь к файлу-приемнику событий аудита")
+	flag.StringVar(&flagAuditURL, "audit-url", "", "URL сервиса-приемника событий аудита")
 
 	flag.Parse()
 
@@ -50,6 +55,14 @@ func GetConfig() *Config {
 	if cfg.DatabaseDSN == "" {
 		cfg.DatabaseDSN = flagDatabaseDSN
 	}
+	if cfg.AuditFile == "" {
+		cfg.AuditFile = flagAuditFile
+	}
+	if cfg.AuditURL == "" {
+		cfg.AuditURL = flagAuditURL
+	}
+
+	cfg.EnableAudit = cfg.AuditFile != "" || cfg.AuditURL != ""
 
 	cfg.UseDB = cfg.DatabaseDSN != ""
 

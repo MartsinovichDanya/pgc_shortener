@@ -23,4 +23,6 @@ vendor/
 .vscode
 
 storage.json
+audit.log
 .env
+profiles/
