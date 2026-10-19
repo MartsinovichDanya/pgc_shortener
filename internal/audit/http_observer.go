@@ -12,8 +12,8 @@ import (
 )
 
 type HTTPObserver struct {
-	url    string
 	client *http.Client
+	url    string
 }
 
 func NewHTTPObserver(url string) *HTTPObserver {

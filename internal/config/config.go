@@ -9,16 +9,16 @@ import (
 
 // Config содержит настройки приложения.
 type Config struct {
-	ServerAddr      string `env:"SERVER_ADDRESS"`                  // адрес запуска HTTP-сервера (флаг -a)
-	BaseURL         string `env:"BASE_URL"`                        // базовый адрес для сокращённого URL (флаг -b)
-	MaxBodySize     int    `env:"MAX_BODY_SIZE" envDefault:"2048"` // максимальный размер тела запроса (пока не задаётся флагом)
-	IDLength        int    `env:"ID_LENGTH" envDefault:"8"`
+	ServerAddr      string `env:"SERVER_ADDRESS"`
+	BaseURL         string `env:"BASE_URL"`
 	LogLevel        string `env:"LOG_LEVEL" envDefault:"DEBUG"`
 	FileStoragePath string `env:"FILE_STORAGE_PATH"`
 	DatabaseDSN     string `env:"DATABASE_DSN"`
 	CookieSecret    string `env:"COOKIE_SECRET" envDefault:"secret123"`
 	AuditFile       string `env:"AUDIT_FILE"`
 	AuditURL        string `env:"AUDIT_URL"`
+	MaxBodySize     int    `env:"MAX_BODY_SIZE" envDefault:"2048"`
+	IDLength        int    `env:"ID_LENGTH" envDefault:"8"`
 	EnableAudit     bool
 	UseDB           bool
 }

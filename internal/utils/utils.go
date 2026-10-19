@@ -6,7 +6,7 @@ import (
 	"math/big"
 )
 
-// newUUID генерирует UUID версии 4.
+// NewUUID генерирует UUID версии 4.
 func NewUUID() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {

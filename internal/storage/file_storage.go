@@ -44,10 +44,10 @@ type Record struct {
 //
 // FileStore реализует интерфейс Store.
 type FileStore struct {
+	data          map[string]Record
+	originalIndex map[string]string
+	filename      string
 	mu            sync.RWMutex
-	data          map[string]Record // shortID -> запись
-	originalIndex map[string]string // originalURL -> shortID (для O(1) проверки дубликатов)
-	filename      string            // путь к файлу персистентности; пусто — только память
 }
 
 // NewFileStore создаёт новый экземпляр FileStore.

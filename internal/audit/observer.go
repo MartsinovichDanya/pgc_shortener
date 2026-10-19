@@ -19,10 +19,10 @@ const (
 
 // Event представляет собой событие аудита
 type Event struct {
-	TS     int64  `json:"ts"`
 	Action Action `json:"action"`
 	UserID string `json:"user_id,omitempty"`
 	URL    string `json:"url"`
+	TS     int64  `json:"ts"`
 }
 
 // NewEvent создает новое событие с текущим timestamp
@@ -42,10 +42,10 @@ type Observer interface {
 
 // Subject (или AuditLogger) управляет наблюдателями
 type Subject struct {
-	mu        sync.RWMutex
-	observers []Observer
 	ch        chan Event
+	observers []Observer
 	wg        sync.WaitGroup
+	mu        sync.RWMutex
 	once      sync.Once
 	closed    bool
 }
