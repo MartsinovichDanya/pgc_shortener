@@ -38,6 +38,7 @@ type ShortenerHandler struct {
 }
 
 // deleteRequest — элемент очереди на удаление.
+// generate:reset
 type deleteRequest struct {
 	userID  string
 	shortID string
