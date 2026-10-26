@@ -61,12 +61,11 @@ func run(pass *analysis.Pass) (interface{}, error) {
 			return
 		}
 		pkgIdent, ok := sel.X.(*ast.Ident)
-		if !ok || pkgIdent.Name != "os" {
+		if !ok {
 			return
 		}
-		// Убеждаемся, что os — это действительно импорт пакета os,
-		// а не локальная переменная/параметр с именем os.
-		pkgName, ok := pass.TypesInfo.ObjectOf(pkgIdent).(*types.PkgName)
+
+		pkgName, ok := pass.TypesInfo.Uses[pkgIdent].(*types.PkgName)
 		if !ok || pkgName.Imported().Path() != "os" {
 			return
 		}

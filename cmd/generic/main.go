@@ -1,38 +1,42 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 type Resettable interface {
 	Reset()
 }
 
+// Pool — типобезопасная обёртка над sync.Pool.
 type Pool[T Resettable] struct {
-	newFunc func() T // фабрика новых объектов, когда пул пуст
-	ch      chan T   // хранилище освобождённых объектов
+	pool    sync.Pool
+	newFunc func() T
 }
 
 func New[T Resettable](f func() T) *Pool[T] {
-	return &Pool[T]{
-		newFunc: f,
-		ch:      make(chan T, 1024), // размер буфера — на ваше усмотрение
+	p := &Pool[T]{newFunc: f}
+	// sync.Pool допускает New == nil: в этом случае Get вернёт nil,
+	// а мы превратим его в var zero T в Get.
+	if f != nil {
+		p.pool.New = func() any { return p.newFunc() }
 	}
+	return p
 }
 
 func (p *Pool[T]) Get() T {
-	select {
-	case v := <-p.ch: // в пуле что-то есть — берём готовый объект
-		return v
-	default: // пул пуст — создаём новый через фабрику
-		return p.newFunc()
+	v := p.pool.Get()
+	if v == nil {
+		var zero T
+		return zero
 	}
+	return v.(T)
 }
 
 func (p *Pool[T]) Put(v T) {
-	v.Reset() // очищаем состояние ОБЪЕКТА — это смысл всего задания
-	select {
-	case p.ch <- v: // пул не переполнен — кладём обратно
-	default: // пул полон — просто отпускаем объект (заберёт GC)
-	}
+	v.Reset()
+	p.pool.Put(v)
 }
 
 // Buffer — пример типа с методом Reset().
@@ -43,12 +47,12 @@ func (b *Buffer) Reset() { *b = (*b)[:0] }
 func main() {
 	pool := New(func() *Buffer { return new(Buffer) })
 
-	buf := pool.Get() // новый объект (пул пуст)
+	buf := pool.Get()
 	*buf = append(*buf, "hello"...)
 	fmt.Println(len(*buf)) // 5
 
-	pool.Put(buf) // сброс + возврат в пул
+	pool.Put(buf)
 
-	buf2 := pool.Get()      // тот же самый объект из пула
-	fmt.Println(len(*buf2)) // 0 — состояние сброшено через Reset()
+	buf2 := pool.Get()
+	fmt.Println(len(*buf2)) // 0 — Reset очистил состояние
 }

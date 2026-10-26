@@ -6,7 +6,6 @@ func (d *deleteRequest) Reset() {
 	if d == nil {
 		return
 	}
-
 	d.userID = ""
 	d.shortID = ""
 }

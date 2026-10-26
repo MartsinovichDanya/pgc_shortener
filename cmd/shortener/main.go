@@ -1,9 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"os"
 
 	"github.com/MartsinovichDanya/pgc_shortener/internal/server"
+	"github.com/joho/godotenv"
 )
 
 // @title           PGC Shortener API
@@ -21,11 +24,12 @@ var buildDate = "N/A"
 var buildCommit = "N/A"
 
 func main() {
-	//err := godotenv.Load()
-	//if err != nil {
-	//	log.Fatal("Error loading .env file")
-	//}
+	if err := godotenv.Load(); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			fmt.Printf("Warning: error loading .env file: %v", err)
+		}
+	}
 
-	fmt.Printf("version: %s\ndate: %s\ncommit: %s\n", buildVersion, buildDate, buildCommit)
+	fmt.Printf("Build version: %s\nBuild date: %s\nBuild commit: %s\n", buildVersion, buildDate, buildCommit)
 	server.Run()
 }
