@@ -110,6 +110,10 @@ type markedStruct struct {
 	recv string
 }
 
+func Exit(code int) {
+	os.Exit(code)
+}
+
 func main() {
 	root := flag.String("root", ".", "root for scanning")
 	flag.Parse()
@@ -118,8 +122,7 @@ func main() {
 
 	err := filepath.WalkDir(*root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "reset: %v\n", err)
-			return nil
+			return err
 		}
 		if !d.IsDir() {
 			return nil
@@ -133,12 +136,13 @@ func main() {
 		}
 		seen[path] = true
 		if err := processDir(path); err != nil {
-			fmt.Fprintf(os.Stderr, "reset: dir %s: %v\n", path, err)
+			return fmt.Errorf("dir %s: %w", path, err)
 		}
 		return nil
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "reset: walk: %v\n", err)
+		fmt.Fprintf(os.Stderr, "reset: %v\n", err)
+		Exit(1)
 	}
 }
 

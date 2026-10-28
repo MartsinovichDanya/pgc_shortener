@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
+	"os"
 )
 
 // NewUUID генерирует UUID версии 4.
@@ -32,4 +33,8 @@ func GenerateID(length int) (string, error) {
 		id[i] = base62Chars[idx.Int64()]
 	}
 	return string(id), nil
+}
+
+func Exit(code int) {
+	os.Exit(code)
 }

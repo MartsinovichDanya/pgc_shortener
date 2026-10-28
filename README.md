@@ -44,9 +44,7 @@ var buildCommit  = "N/A"
 При обычной сборке они остаются равными `"N/A"`, и при старте сервер выведет:
 
 ```
-version: N/A
-date: N/A
-commit: N/A
+{"level":"info","ts":1793175609.1788976,"caller":"shortener/main.go:45","msg":"Build info","Build version":"N/A","Build date":"N/A","Build commit":"N/A"}
 ```
 
 Чтобы получить реальные значения, передайте их линковщику через флаг `-ldflags` с опцией `-X`. Для пакета `main`, лежащего в `cmd/shortener`, правильный формат — `main.<имя_переменной>=<значение>`:
@@ -62,9 +60,7 @@ go build -ldflags "\
 Результат при запуске `./shortener`:
 
 ```
-version: iter23
-date: 2026-10-27T09:00:00Z
-commit: a1b2c3d
+{"level":"info","ts":1793175609.1788976,"caller":"shortener/main.go:45","msg":"Build info","Build version":"iter23","Build date":"2026-10-27T09:00:00Z","Build commit":"a1b2c3d"}
 ```
 
 ## Запуск

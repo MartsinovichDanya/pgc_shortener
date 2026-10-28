@@ -16,18 +16,26 @@ func TestPutResetsState(t *testing.T) {
 	}
 }
 
-// Get после Put должен возвращать тот же объект (без GC-давления).
-func TestGetReturnsPutObject(t *testing.T) {
+// После Put объект чистый. То, что Get может вернуть другой объект
+// (GC вправе очистить пул между вызовами), на корректность не влияет:
+// проверяем именно гарантируемый инвариант -- любой объект из Get чист.
+func TestGetReturnsCleanObject(t *testing.T) {
 	p := New(func() *Buffer { return new(Buffer) })
 	b := p.Get()
 	*b = append(*b, 1, 2, 3)
 	p.Put(b)
+	// Reset точно был вызван на b -- это гарантия Put.
+	if len(*b) != 0 {
+		t.Fatalf("expected Reset to clear state, got %d bytes", len(*b))
+	}
 	b2 := p.Get()
-	if b2 != b {
-		t.Fatal("expected Get to return the same object that was Put")
+	// b2 может быть как b, так и свежим объектом из фабрики --
+	// в обоих случаях он обязан быть чистым.
+	if b2 == nil {
+		t.Fatal("expected non-nil object")
 	}
 	if len(*b2) != 0 {
-		t.Fatalf("expected Reset state, got %d bytes", len(*b2))
+		t.Fatalf("expected clean object from Get, got %d bytes", len(*b2))
 	}
 }
 
@@ -39,7 +47,9 @@ func TestNilFactoryReturnsZero(t *testing.T) {
 	}
 }
 
-// nil-фабрика + Put: Reset вызывается, Get возвращает объект обратно.
+// nil-фабрика + Put: Reset вызывается при Put. Get может вернуть
+// тот же объект, nil (если GC очистил пул) или... в любом случае,
+// что бы ни вернулось -- оно должно быть чистым.
 func TestNilFactoryAfterPut(t *testing.T) {
 	p := New[*Buffer](nil)
 	b := new(Buffer)
@@ -48,8 +58,10 @@ func TestNilFactoryAfterPut(t *testing.T) {
 	if len(*b) != 0 {
 		t.Fatal("expected Reset to be called on Put")
 	}
-	if got := p.Get(); got != b {
-		t.Fatal("expected Get to return the object that was Put")
+	// Указательное равенство здесь не проверяем: sync.Pool не гарантирует,
+	// что Get вернёт именно b. Гарантия -- чистота объекта (или nil).
+	if got := p.Get(); got != nil && len(*got) != 0 {
+		t.Fatalf("expected clean object or nil, got %d bytes", len(*got))
 	}
 }
 

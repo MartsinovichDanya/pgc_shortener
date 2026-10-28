@@ -19,12 +19,7 @@ import (
 )
 
 // Run инициализирует все зависимости, настраивает роутер и запускает HTTP-сервер.
-func Run() error {
-	cfg := config.GetConfig()
-
-	if err := logger.Initialize(cfg.LogLevel); err != nil {
-		return err
-	}
+func Run(cfg *config.Config) error {
 	logger.Log.Debug("Running config", zap.Any("config", cfg))
 
 	var store storage.Store
