@@ -25,11 +25,11 @@ import (
 // иначе компилятор не даст собрать пакет.
 // ---------------------------------------------------------------------------
 type mockStore struct {
-	mu      sync.Mutex
 	byID    map[string]string
 	byURL   map[string]string
-	users   map[string][]string // userID -> список shortID
+	users   map[string][]string
 	deleted map[string]bool
+	mu      sync.Mutex
 }
 
 func newMockStore() *mockStore {

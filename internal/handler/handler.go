@@ -26,19 +26,19 @@ import (
 
 // ShortenerHandler содержит зависимости HTTP-обработчиков.
 type ShortenerHandler struct {
-	Store         storage.Store
-	BaseURL       string
-	MaxBodySize   int
-	IDLength      int
-	UseDB         bool
-	auditObserver audit.Observer
-
+	Store           storage.Store
+	auditObserver   audit.Observer
 	deleteCh        chan deleteRequest
+	BaseURL         string
 	deleteWg        sync.WaitGroup
+	MaxBodySize     int
+	IDLength        int
 	deleteCloseOnce sync.Once
+	UseDB           bool
 }
 
 // deleteRequest — элемент очереди на удаление.
+// generate:reset
 type deleteRequest struct {
 	userID  string
 	shortID string

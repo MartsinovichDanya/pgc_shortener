@@ -38,8 +38,8 @@ func GzipMiddleware(next http.Handler) http.Handler {
 // gzipResponseWriter оборачивает http.ResponseWriter и при необходимости сжимает данные.
 type gzipResponseWriter struct {
 	http.ResponseWriter
-	supportsGzip bool
 	writer       *gzip.Writer
+	supportsGzip bool
 	started      bool
 }
 
