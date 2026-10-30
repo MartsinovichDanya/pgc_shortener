@@ -18,6 +18,11 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	certFile = "cert/cert.pem"
+	keyFile  = "cert/private.pem"
+)
+
 // Run инициализирует все зависимости, настраивает роутер и запускает HTTP-сервер.
 func Run(cfg *config.Config) error {
 	logger.Log.Debug("Running config", zap.Any("config", cfg))
@@ -111,6 +116,21 @@ func Run(cfg *config.Config) error {
 	//	}
 	//}()
 
+	// --- Запуск сервера: HTTPS при cfg.EnableHTTPS, иначе обычный HTTP ---
+	if cfg.EnableHTTPS {
+		logger.Log.Info("Starting HTTPS server",
+			zap.String("addr", cfg.ServerAddr),
+			zap.String("cert", certFile),
+			zap.String("key", keyFile),
+		)
+		if err := http.ListenAndServeTLS(cfg.ServerAddr, certFile, keyFile, r); err != nil {
+			logger.Log.Error("HTTPS server failed", zap.Error(err))
+			return err
+		}
+		return nil
+	}
+
+	logger.Log.Info("Starting HTTP server", zap.String("addr", cfg.ServerAddr))
 	if err := http.ListenAndServe(cfg.ServerAddr, r); err != nil {
 		return err
 	}
