@@ -19,6 +19,7 @@ type Config struct {
 	AuditURL        string `env:"AUDIT_URL"`
 	MaxBodySize     int    `env:"MAX_BODY_SIZE" envDefault:"2048"`
 	IDLength        int    `env:"ID_LENGTH" envDefault:"8"`
+	EnableHTTPS     bool   `env:"ENABLE_HTTPS"`
 	EnableAudit     bool
 	UseDB           bool
 }
@@ -28,6 +29,7 @@ func GetConfig() *Config {
 	var cfg Config
 	var flagServerAddr, flagBaseURL, flagFileStoragePath,
 		flagDatabaseDSN, flagAuditFile, flagAuditURL string
+	var flagEnableHTTPS bool
 
 	err := env.Parse(&cfg)
 	if err != nil {
@@ -40,6 +42,7 @@ func GetConfig() *Config {
 	flag.StringVar(&flagDatabaseDSN, "d", "", "строка подключения в БД")
 	flag.StringVar(&flagAuditFile, "audit-file", "", "путь к файлу-приемнику событий аудита")
 	flag.StringVar(&flagAuditURL, "audit-url", "", "URL сервиса-приемника событий аудита")
+	flag.BoolVar(&flagEnableHTTPS, "s", false, "Использование защищенного протокола")
 
 	flag.Parse()
 
@@ -60,6 +63,9 @@ func GetConfig() *Config {
 	}
 	if cfg.AuditURL == "" {
 		cfg.AuditURL = flagAuditURL
+	}
+	if !cfg.EnableHTTPS {
+		cfg.EnableHTTPS = flagEnableHTTPS
 	}
 
 	cfg.EnableAudit = cfg.AuditFile != "" || cfg.AuditURL != ""
