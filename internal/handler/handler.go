@@ -66,10 +66,27 @@ func NewShortenerHandler(store storage.Store, baseURL string, maxBodySize, idLen
 }
 
 // Shutdown корректно останавливает фоновый воркер удаления.
-func (h *ShortenerHandler) Shutdown() {
+//
+// close(deleteCh) сигнализирует воркеру дочитать канал и сделать финальный
+// flush. Ждём завершения воркера через отдельную горутину, чтобы уважать
+// таймаут ctx: если BatchDelete завис (БД недоступна и т.п.), не блокируем
+// весь graceful shutdown сервера.
+func (h *ShortenerHandler) Shutdown(ctx context.Context) {
 	h.deleteCloseOnce.Do(func() {
-		close(h.deleteCh) // сигнал воркеру: обработать все оставшиеся элементы и завершиться
-		h.deleteWg.Wait()
+		close(h.deleteCh)
+
+		done := make(chan struct{})
+		go func() {
+			h.deleteWg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			logger.Log.Info("delete worker stopped")
+		case <-ctx.Done():
+			logger.Log.Error("delete worker shutdown timed out", zap.Error(ctx.Err()))
+		}
 	})
 }
 
@@ -490,22 +507,26 @@ func (h *ShortenerHandler) deleteWorker() {
 	defer h.deleteWg.Done()
 
 	const (
-		flushInterval = time.Second // интервал сброса
-		maxBufferSize = 100         // максимальный суммарный размер буфера
+		flushInterval = time.Second     // интервал сброса
+		maxBufferSize = 100             // максимальный суммарный размер буфера
+		flushTimeout  = 5 * time.Second // ← новое: таймаут одной серии BatchDelete
 	)
 
-	buffer := make(map[string][]string) // userID -> slice of shortIDs
+	buffer := make(map[string][]string)
 	totalItems := 0
 	ticker := time.NewTicker(flushInterval)
 	defer ticker.Stop()
 
-	// Внутренняя функция сброса буфера в хранилище
+	// Внутренняя функция сброса буфера в хранилище.
+	// Ограничиваем себя таймаутом, чтобы зависший BatchDelete не блокировал
+	// воркер (и, как следствие, Shutdown) навсегда.
 	flush := func() {
 		if totalItems == 0 {
 			return
 		}
-		// Используем фоновый контекст, так как здесь нет HTTP-запроса
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), flushTimeout)
+		defer cancel()
+
 		for userID, ids := range buffer {
 			if err := h.Store.BatchDelete(ctx, ids, userID); err != nil {
 				logger.Log.Error("Ошибка пакетного удаления URL",
@@ -514,7 +535,6 @@ func (h *ShortenerHandler) deleteWorker() {
 				)
 			}
 		}
-		// Очистка буфера
 		buffer = make(map[string][]string)
 		totalItems = 0
 	}

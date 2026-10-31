@@ -340,3 +340,5 @@ func (s *FileStore) writeAll() error {
 	}
 	return nil
 }
+
+func (s *FileStore) Close() {}

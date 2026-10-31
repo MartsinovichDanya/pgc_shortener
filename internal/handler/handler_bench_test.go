@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -47,7 +49,12 @@ func newBenchServer(tb testing.TB) *httptest.Server {
 	srv := httptest.NewServer(r)
 	tb.Cleanup(func() {
 		srv.Close()
-		h.Shutdown()
+
+		// Даём воркеру разумный таймаут на финальный flush, чтобы
+		// зависший BatchDelete не подвесил завершение бенчмарка.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		h.Shutdown(ctx)
 	})
 	return srv
 }
