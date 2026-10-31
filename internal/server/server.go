@@ -1,7 +1,12 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/MartsinovichDanya/pgc_shortener/internal/audit"
@@ -16,6 +21,11 @@ import (
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	httpSwagger "github.com/swaggo/http-swagger"
 	"go.uber.org/zap"
+)
+
+const (
+	certFile = "cert/cert.pem"
+	keyFile  = "cert/private.pem"
 )
 
 // Run инициализирует все зависимости, настраивает роутер и запускает HTTP-сервер.
@@ -111,9 +121,67 @@ func Run(cfg *config.Config) error {
 	//	}
 	//}()
 
-	if err := http.ListenAndServe(cfg.ServerAddr, r); err != nil {
-		return err
+	// --- Запуск сервера: HTTPS при cfg.EnableHTTPS, иначе обычный HTTP ---
+	srv := &http.Server{
+		Addr:    cfg.ServerAddr,
+		Handler: r,
 	}
 
+	serverErr := make(chan error, 1)
+
+	go func() {
+		var err error
+		if cfg.EnableHTTPS {
+			logger.Log.Info("Starting HTTPS server",
+				zap.String("addr", cfg.ServerAddr),
+				zap.String("cert", certFile),
+				zap.String("key", keyFile),
+			)
+			err = srv.ListenAndServeTLS(certFile, keyFile)
+		} else {
+			logger.Log.Info("Starting HTTP server", zap.String("addr", cfg.ServerAddr))
+			err = srv.ListenAndServe()
+		}
+		// ErrServerClosed — нормальное завершение после Shutdown, не считаем ошибкой.
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+			return
+		}
+		serverErr <- nil
+	}()
+
+	// Ждём либо сигнал ОС, либо фатальную ошибку сервера.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT)
+	defer signal.Stop(sigCh)
+
+	select {
+	case sig := <-sigCh:
+		logger.Log.Info("Received shutdown signal", zap.String("signal", sig.String()))
+	case err := <-serverErr:
+		if err != nil {
+			logger.Log.Error("Server failed", zap.Error(err))
+			return err
+		}
+		return nil
+	}
+
+	// Shutdown перестаёт принимать новые соединения и ждёт,
+	// пока все активные хендлеры вернутся.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Log.Error("Graceful shutdown failed", zap.Error(err))
+	}
+
+	// Ждём финального flush воркера удаления с таймаутом,
+	// чтобы даже при зависшем BatchDelete не висеть навсегда.
+	handlerCtx, handlerCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ServiceHandler.Shutdown(handlerCtx)
+	handlerCancel()
+
+	store.Close()
+	logger.Log.Info("Server stopped gracefully")
 	return nil
 }
