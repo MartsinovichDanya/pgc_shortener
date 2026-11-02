@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 
+	"dario.cat/mergo"
 	"github.com/caarlos0/env/v6"
 )
 
@@ -29,7 +30,6 @@ type Config struct {
 }
 
 // FileConfig — структура для чтения JSON-файла конфигурации.
-// Содержит только те поля, которые разрешено задавать в файле.
 type FileConfig struct {
 	ServerAddr      string `json:"server_address"`
 	BaseURL         string `json:"base_url"`
@@ -53,18 +53,42 @@ func LoadFromJSON(path string) (*FileConfig, error) {
 	return cfg, nil
 }
 
-// GetConfig обрабатывает аргументы командной строки и переменные окружения, возвращает заполненную конфигурацию.
+// GetConfig собирает конфигурацию из трёх источников.
+//
+// Приоритет (от высшего к низшему):
+//  1. переменные окружения
+//  2. явно заданные флаги командной строки
+//  3. файл конфигурации
+//  4. значения по умолчанию флагов
+//
+// Каждый слой передаётся в mergo.Merge по порядку; mergo заполняет только
+// пустые поля, поэтому ранее слитые (более приоритетные) значения сохраняются.
+// Логика одинакова для всех полей — добавление нового параметра сводится
+// к добавлению одной строки в нужный слой, а не к новому блоку if.
 func GetConfig() *Config {
-	var cfg Config
-	var flagServerAddr, flagBaseURL, flagFileStoragePath,
-		flagDatabaseDSN, flagAuditFile, flagAuditURL,
-		flagConfigFile string
-	var flagEnableHTTPS bool
-
-	err := env.Parse(&cfg)
-	if err != nil {
+	// --- Слой 1: переменные окружения (наивысший приоритет) ---
+	envCfg := &Config{}
+	if err := env.Parse(envCfg); err != nil {
 		log.Fatal(err)
 	}
+
+	// ENABLE_HTTPS — единственное bool-поле, для которого «false» может быть
+	// осознанным значением из env. mergo не отличает false от «не задано»,
+	// поэтому вынесем его из общего слияния и посчитаем отдельно.
+	envHTTPS := envCfg.EnableHTTPS
+	_, envHTTPSSet := os.LookupEnv("ENABLE_HTTPS")
+
+	// --- Слой 2: флаги командной строки ---
+	var (
+		flagServerAddr      string
+		flagBaseURL         string
+		flagFileStoragePath string
+		flagDatabaseDSN     string
+		flagAuditFile       string
+		flagAuditURL        string
+		flagConfigFile      string
+		flagEnableHTTPS     bool
+	)
 
 	flag.StringVar(&flagServerAddr, "a", "localhost:8080", "адрес запуска HTTP-сервера")
 	flag.StringVar(&flagBaseURL, "b", "http://localhost:8080", "базовый адрес результирующего сокращённого URL")
@@ -73,87 +97,93 @@ func GetConfig() *Config {
 	flag.StringVar(&flagAuditFile, "audit-file", "", "путь к файлу-приемнику событий аудита")
 	flag.StringVar(&flagAuditURL, "audit-url", "", "URL сервиса-приемника событий аудита")
 	flag.BoolVar(&flagEnableHTTPS, "s", false, "Использование защищенного протокола")
-
 	flag.StringVar(&flagConfigFile, "config", "", "путь к файлу конфигурации")
 	flag.StringVar(&flagConfigFile, "c", "", "путь к файлу конфигурации")
-
 	flag.Parse()
 
 	setFlags := make(map[string]bool)
 	flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 
-	if cfg.ConfigFile == "" {
-		cfg.ConfigFile = flagConfigFile
+	// Явно заданные флаги — отдельный слой. Заполняем только реально
+	// переданные значения, чтобы mergo не затирал более приоритетный env.
+	explicitFlags := &Config{}
+	if setFlags["a"] {
+		explicitFlags.ServerAddr = flagServerAddr
+	}
+	if setFlags["b"] {
+		explicitFlags.BaseURL = flagBaseURL
+	}
+	if setFlags["f"] {
+		explicitFlags.FileStoragePath = flagFileStoragePath
+	}
+	if setFlags["d"] {
+		explicitFlags.DatabaseDSN = flagDatabaseDSN
+	}
+	if setFlags["audit-file"] {
+		explicitFlags.AuditFile = flagAuditFile
+	}
+	if setFlags["audit-url"] {
+		explicitFlags.AuditURL = flagAuditURL
+	}
+	// EnableHTTPS — см. специальную обработку ниже.
+
+	// --- Слой 3: файл конфигурации ---
+	configFile := envCfg.ConfigFile
+	if configFile == "" {
+		configFile = flagConfigFile
 	}
 
-	var fileCfg FileConfig
-	if cfg.ConfigFile != "" {
-		fc, err := LoadFromJSON(cfg.ConfigFile)
+	fileCfg := &Config{}
+	var fileEnableHTTPS bool
+	if configFile != "" {
+		fc, err := LoadFromJSON(configFile)
 		if err != nil {
 			log.Fatalf("load config: %v", err)
 		}
-		fileCfg = *fc
+		// FileConfig и Config — разные типы, поэтому маппим вручную.
+		// Это единственный участок «клея» между структурами.
+		fileCfg.ServerAddr = fc.ServerAddr
+		fileCfg.BaseURL = fc.BaseURL
+		fileCfg.FileStoragePath = fc.FileStoragePath
+		fileCfg.DatabaseDSN = fc.DatabaseDSN
+		fileCfg.AuditFile = fc.AuditFile
+		fileCfg.AuditURL = fc.AuditURL
+		fileEnableHTTPS = fc.EnableHTTPS
 	}
 
-	if cfg.ServerAddr == "" {
-		if !setFlags["a"] && fileCfg.ServerAddr != "" {
-			cfg.ServerAddr = fileCfg.ServerAddr
-		} else {
-			cfg.ServerAddr = flagServerAddr
+	// --- Слой 4: значения по умолчанию флагов (низший приоритет) ---
+	flagDefaults := &Config{
+		ServerAddr:      "localhost:8080",
+		BaseURL:         "http://localhost:8080",
+		FileStoragePath: "storage.json",
+	}
+
+	// --- Слияние: env → explicitFlags → fileCfg → flagDefaults ---
+	// Каждый вызов mergo.Merge заполняет только пустые поля в result,
+	// поэтому источник, слитый раньше, выигрывает без дополнительных проверок.
+	result := envCfg
+	for _, layer := range []*Config{explicitFlags, fileCfg, flagDefaults} {
+		if err := mergo.Merge(result, layer); err != nil {
+			log.Fatalf("merge config layer: %v", err)
 		}
 	}
 
-	if cfg.BaseURL == "" {
-		if !setFlags["b"] && fileCfg.BaseURL != "" {
-			cfg.BaseURL = fileCfg.BaseURL
-		} else {
-			cfg.BaseURL = flagBaseURL
-		}
+	// --- Tri-state для EnableHTTPS ---
+	// env (даже false) > явный флаг > файл > дефолт.
+	switch {
+	case envHTTPSSet:
+		result.EnableHTTPS = envHTTPS
+	case setFlags["s"]:
+		result.EnableHTTPS = flagEnableHTTPS
+	case fileEnableHTTPS:
+		result.EnableHTTPS = true
+	default:
+		result.EnableHTTPS = false
 	}
 
-	if cfg.FileStoragePath == "" {
-		if !setFlags["f"] && fileCfg.FileStoragePath != "" {
-			cfg.FileStoragePath = fileCfg.FileStoragePath
-		} else {
-			cfg.FileStoragePath = flagFileStoragePath
-		}
-	}
+	result.ConfigFile = configFile
+	result.EnableAudit = result.AuditFile != "" || result.AuditURL != ""
+	result.UseDB = result.DatabaseDSN != ""
 
-	if cfg.DatabaseDSN == "" {
-		if !setFlags["d"] && fileCfg.DatabaseDSN != "" {
-			cfg.DatabaseDSN = fileCfg.DatabaseDSN
-		} else {
-			cfg.DatabaseDSN = flagDatabaseDSN
-		}
-	}
-
-	if cfg.AuditFile == "" {
-		if !setFlags["audit-file"] && fileCfg.AuditFile != "" {
-			cfg.AuditFile = fileCfg.AuditFile
-		} else {
-			cfg.AuditFile = flagAuditFile
-		}
-	}
-
-	if cfg.AuditURL == "" {
-		if !setFlags["audit-url"] && fileCfg.AuditURL != "" {
-			cfg.AuditURL = fileCfg.AuditURL
-		} else {
-			cfg.AuditURL = flagAuditURL
-		}
-	}
-
-	if _, envHTTPSSet := os.LookupEnv("ENABLE_HTTPS"); !envHTTPSSet {
-		if !setFlags["s"] && fileCfg.EnableHTTPS {
-			cfg.EnableHTTPS = true
-		} else {
-			cfg.EnableHTTPS = flagEnableHTTPS
-		}
-	}
-
-	cfg.EnableAudit = cfg.AuditFile != "" || cfg.AuditURL != ""
-
-	cfg.UseDB = cfg.DatabaseDSN != ""
-
-	return &cfg
+	return result
 }

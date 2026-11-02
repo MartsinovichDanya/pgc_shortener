@@ -4,9 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/MartsinovichDanya/pgc_shortener/internal/audit"
@@ -21,6 +18,7 @@ import (
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	httpSwagger "github.com/swaggo/http-swagger"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -28,18 +26,23 @@ const (
 	keyFile  = "cert/private.pem"
 )
 
-// Run инициализирует все зависимости, настраивает роутер и запускает HTTP-сервер.
-func Run(cfg *config.Config) error {
+// Run инициализирует все зависимости, запускает HTTP-сервер и дожидается
+// отмены переданного контекста (сигнал ОС из main() или критическая ошибка
+// сервера). После этого выполняет graceful shutdown всех созданных
+// компонентов в порядке, обратном инициализации.
+//
+// Управление сигналами ОС и ожидание дочерних горутин выполняет main():
+// он является единственной «корневой» горутиной, которая гарантирует,
+// что до завершения процесса все остальные горутины остановятся.
+func Run(ctx context.Context, cfg *config.Config) error {
 	logger.Log.Debug("Running config", zap.Any("config", cfg))
 
 	var store storage.Store
 	var err error
 
 	if cfg.UseDB {
-		// Создаём хранилище в PostgreSQL (DSN берётся из конфига).
 		store, err = storage.NewPostgresStore(cfg.DatabaseDSN)
 	} else {
-		// Файловое/локальное хранилище.
 		store, err = storage.NewFileStore(cfg.FileStoragePath)
 	}
 	if err != nil {
@@ -47,6 +50,7 @@ func Run(cfg *config.Config) error {
 		return err
 	}
 	logger.Log.Debug("Storage created")
+	defer store.Close()
 
 	var auditObserver audit.Observer
 
@@ -68,12 +72,10 @@ func Run(cfg *config.Config) error {
 
 		auditObserver = auditSubject
 		logger.Log.Debug("Audit initialized")
-
 		defer auditSubject.Shutdown(2 * time.Second)
 	}
 
 	ServiceHandler := handler.NewShortenerHandler(store, cfg.BaseURL, cfg.MaxBodySize, cfg.IDLength, cfg.UseDB, auditObserver)
-
 	logger.Log.Debug("Handler created")
 
 	r := chi.NewRouter()
@@ -110,26 +112,17 @@ func Run(cfg *config.Config) error {
 		http.Error(w, "Некорректный запрос", http.StatusBadRequest)
 	})
 
-	//go func() {
-	//	mux := http.NewServeMux()
-	//	mux.HandleFunc("/debug/pprof/", pprof.Index)
-	//	mux.HandleFunc("/debug/pprof/heap", pprof.Handler("heap").ServeHTTP)
-	//	mux.HandleFunc("/debug/pprof/goroutine", pprof.Handler("goroutine").ServeHTTP)
-	//	logger.Log.Debug("pprof listening on :6060")
-	//	if err := http.ListenAndServe(":6060", mux); err != nil {
-	//		logger.Log.Error("pprof server failed", zap.Error(err))
-	//	}
-	//}()
-
-	// --- Запуск сервера: HTTPS при cfg.EnableHTTPS, иначе обычный HTTP ---
 	srv := &http.Server{
 		Addr:    cfg.ServerAddr,
 		Handler: r,
 	}
 
-	serverErr := make(chan error, 1)
+	// errgroup дожидается дочерних горутин и собирает их ошибки.
+	// gCtx отменяется при отмене родительского ctx (сигнал из main())
+	// либо при первой ошибке дочерней горутины.
+	g, gCtx := errgroup.WithContext(ctx)
 
-	go func() {
+	g.Go(func() error {
 		var err error
 		if cfg.EnableHTTPS {
 			logger.Log.Info("Starting HTTPS server",
@@ -142,46 +135,39 @@ func Run(cfg *config.Config) error {
 			logger.Log.Info("Starting HTTP server", zap.String("addr", cfg.ServerAddr))
 			err = srv.ListenAndServe()
 		}
-		// ErrServerClosed — нормальное завершение после Shutdown, не считаем ошибкой.
+		// ErrServerClosed — нормальное завершение после Shutdown.
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErr <- err
-			return
-		}
-		serverErr <- nil
-	}()
-
-	// Ждём либо сигнал ОС, либо фатальную ошибку сервера.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGQUIT)
-	defer signal.Stop(sigCh)
-
-	select {
-	case sig := <-sigCh:
-		logger.Log.Info("Received shutdown signal", zap.String("signal", sig.String()))
-	case err := <-serverErr:
-		if err != nil {
-			logger.Log.Error("Server failed", zap.Error(err))
 			return err
 		}
 		return nil
-	}
+	})
 
-	// Shutdown перестаёт принимать новые соединения и ждёт,
-	// пока все активные хендлеры вернутся.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	// Ждём либо отмены контекста (сигнал ОС), либо критической ошибки сервера.
+	<-gCtx.Done()
+	logger.Log.Info("Shutdown initiated")
 
+	// 1. Останавливаем приём новых соединений, дожидаемся активных хендлеров.
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Log.Error("Graceful shutdown failed", zap.Error(err))
+		logger.Log.Error("HTTP server shutdown failed", zap.Error(err))
 	}
+	cancelShutdown()
 
-	// Ждём финального flush воркера удаления с таймаутом,
-	// чтобы даже при зависшем BatchDelete не висеть навсегда.
-	handlerCtx, handlerCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// 2. Дожидаемся завершения горутины сервера и получаем её ошибку.
+	serverErr := g.Wait()
+
+	// 3. Останавливаем фоновые воркеры хендлера (batch delete и т.п.).
+	handlerCtx, cancelHandler := context.WithTimeout(context.Background(), 10*time.Second)
 	ServiceHandler.Shutdown(handlerCtx)
-	handlerCancel()
+	cancelHandler()
 
-	store.Close()
+	// store.Close() и auditSubject.Shutdown() выполнятся через defer
+	// в порядке, обратном регистрации.
+
+	if serverErr != nil {
+		logger.Log.Error("Server failed", zap.Error(serverErr))
+		return serverErr
+	}
 	logger.Log.Info("Server stopped gracefully")
 	return nil
 }

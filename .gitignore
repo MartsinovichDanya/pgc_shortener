@@ -27,3 +27,5 @@ audit.log
 .env
 profiles/
 cert
+config.json
+
