@@ -119,6 +119,10 @@ func (m *mockStore) BatchDelete(_ context.Context, ids []string, userID string) 
 // Ping не нужен при UseDB=false, но метод полезно иметь на будущее.
 func (m *mockStore) Ping(_ context.Context) error { return nil }
 
+// Close — no-op. Нужен, чтобы mockStore удовлетворял обновлённому
+// интерфейсу storage.Store (в нём появился метод Close()).
+func (m *mockStore) Close() {}
+
 // ---------------------------------------------------------------------------
 // Вспомогательный конструктор обработчика для примеров.
 // ---------------------------------------------------------------------------
@@ -139,7 +143,7 @@ func newTestHandler(store storage.Store) *handler.ShortenerHandler {
 func ExampleShortenerHandler_CreateShortLink() {
 	store := newMockStore()
 	h := newTestHandler(store)
-	defer h.Shutdown()
+	defer h.Shutdown(context.Background())
 
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("https://example.com"))
 	rec := httptest.NewRecorder()
@@ -161,7 +165,7 @@ func ExampleShortenerHandler_CreateShortLink() {
 func ExampleShortenerHandler_ShortenAPI() {
 	store := newMockStore()
 	h := newTestHandler(store)
-	defer h.Shutdown()
+	defer h.Shutdown(context.Background())
 
 	payload := `{"url":"https://example.com"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/shorten", strings.NewReader(payload))
@@ -190,7 +194,7 @@ func ExampleShortenerHandler_Redirect() {
 	// Предварительно «сохраняем» ссылку.
 	_ = store.Save(context.Background(), "abc12345", "https://example.com", "")
 	h := newTestHandler(store)
-	defer h.Shutdown()
+	defer h.Shutdown(context.Background())
 
 	req := httptest.NewRequest(http.MethodGet, "/abc12345", nil)
 	rctx := chi.NewRouteContext()
@@ -213,7 +217,7 @@ func ExampleShortenerHandler_Redirect() {
 func ExampleShortenerHandler_PingHandler() {
 	store := newMockStore()
 	h := newTestHandler(store)
-	defer h.Shutdown()
+	defer h.Shutdown(context.Background())
 
 	req := httptest.NewRequest(http.MethodGet, "/ping", nil)
 	rec := httptest.NewRecorder()
@@ -231,7 +235,7 @@ func ExampleShortenerHandler_PingHandler() {
 func ExampleShortenerHandler_ShortenBatch() {
 	store := newMockStore()
 	h := newTestHandler(store)
-	defer h.Shutdown()
+	defer h.Shutdown(context.Background())
 
 	payload := `[
 		{"correlation_id":"1","original_url":"https://example.com"},
@@ -263,7 +267,7 @@ func ExampleShortenerHandler_UserURLs() {
 	store := newMockStore()
 	_ = store.Save(context.Background(), "abc12345", "https://example.com", "user-1")
 	h := newTestHandler(store)
-	defer h.Shutdown()
+	defer h.Shutdown(context.Background())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/user/urls", nil)
 	req = req.WithContext(context.WithValue(req.Context(), auth.UserIDKey, "user-1"))
@@ -289,7 +293,7 @@ func ExampleShortenerHandler_UserURLs() {
 func ExampleShortenerHandler_DeleteUserURLs() {
 	store := newMockStore()
 	h := newTestHandler(store)
-	defer h.Shutdown()
+	defer h.Shutdown(context.Background())
 
 	body := `["abc12345","def67890"]`
 	req := httptest.NewRequest(http.MethodDelete, "/api/user/urls", strings.NewReader(body))
@@ -325,7 +329,7 @@ func Example_fullFlow() {
 		false,
 		nil,
 	)
-	defer h.Shutdown()
+	defer h.Shutdown(context.Background())
 
 	r := chi.NewRouter()
 	r.Post("/", h.CreateShortLink)

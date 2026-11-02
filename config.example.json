@@ -1,0 +1,9 @@
+{
+  "server_address": "localhost:8080",
+  "base_url": "http://localhost:8080",
+  "file_storage_path": "storage.json",
+  "database_dsn": "postgres://user:pass@localhost:5432/shortener",
+  "audit_file": "/var/log/shortener/audit.log",
+  "audit_url": "http://audit.example.com/events",
+  "enable_https": false
+}

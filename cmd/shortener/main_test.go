@@ -143,7 +143,12 @@ func newTestServer(t *testing.T, store storage.Store) *httptest.Server {
 	ts := httptest.NewServer(router)
 	t.Cleanup(func() {
 		ts.Close()
-		h.Shutdown()
+
+		// Даём воркеру разумный таймаут на финальный flush,
+		// чтобы зависший BatchDelete не подвесил тест.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		h.Shutdown(ctx)
 	})
 	return ts
 }

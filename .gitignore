@@ -26,3 +26,6 @@ storage.json
 audit.log
 .env
 profiles/
+cert
+config.json
+
