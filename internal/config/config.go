@@ -24,6 +24,7 @@ type Config struct {
 	MaxBodySize     int    `env:"MAX_BODY_SIZE"    envDefault:"2048"`
 	IDLength        int    `env:"ID_LENGTH"        envDefault:"8"`
 	EnableHTTPS     bool   `env:"ENABLE_HTTPS"`
+	TrustedSubnet   string `env:"TRUSTED_SUBNET"`
 	ConfigFile      string `env:"CONFIG"`
 	EnableAudit     bool
 	UseDB           bool
@@ -38,6 +39,7 @@ type FileConfig struct {
 	AuditFile       string `json:"audit_file"`
 	AuditURL        string `json:"audit_url"`
 	EnableHTTPS     bool   `json:"enable_https"`
+	TrustedSubnet   string `json:"trusted_subnet"`
 }
 
 // LoadFromJSON читает конфигурацию из JSON-файла.
@@ -87,6 +89,7 @@ func GetConfig() *Config {
 		flagAuditFile       string
 		flagAuditURL        string
 		flagConfigFile      string
+		flagTrustedSubnet   string
 		flagEnableHTTPS     bool
 	)
 
@@ -96,9 +99,10 @@ func GetConfig() *Config {
 	flag.StringVar(&flagDatabaseDSN, "d", "", "строка подключения в БД")
 	flag.StringVar(&flagAuditFile, "audit-file", "", "путь к файлу-приемнику событий аудита")
 	flag.StringVar(&flagAuditURL, "audit-url", "", "URL сервиса-приемника событий аудита")
-	flag.BoolVar(&flagEnableHTTPS, "s", false, "Использование защищенного протокола")
+	flag.BoolVar(&flagEnableHTTPS, "s", false, "использование защищенного протокола")
 	flag.StringVar(&flagConfigFile, "config", "", "путь к файлу конфигурации")
 	flag.StringVar(&flagConfigFile, "c", "", "путь к файлу конфигурации")
+	flag.StringVar(&flagTrustedSubnet, "t", "", "доверенная подсеть")
 	flag.Parse()
 
 	setFlags := make(map[string]bool)
@@ -118,6 +122,9 @@ func GetConfig() *Config {
 	}
 	if setFlags["d"] {
 		explicitFlags.DatabaseDSN = flagDatabaseDSN
+	}
+	if setFlags["t"] {
+		explicitFlags.TrustedSubnet = flagTrustedSubnet
 	}
 	if setFlags["audit-file"] {
 		explicitFlags.AuditFile = flagAuditFile
@@ -148,6 +155,7 @@ func GetConfig() *Config {
 		fileCfg.DatabaseDSN = fc.DatabaseDSN
 		fileCfg.AuditFile = fc.AuditFile
 		fileCfg.AuditURL = fc.AuditURL
+		fileCfg.TrustedSubnet = fc.TrustedSubnet
 		fileEnableHTTPS = fc.EnableHTTPS
 	}
 
