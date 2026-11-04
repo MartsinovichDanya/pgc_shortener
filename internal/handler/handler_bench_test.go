@@ -23,11 +23,25 @@ import (
 const (
 	benchSecret  = "bench-secret"
 	benchBaseURL = "http://localhost:8080"
+
+	// benchTrustedSubnet — доверенная подсеть, используемая в тестах /stats.
+	benchTrustedSubnet = "192.168.0.0/16"
 )
 
 // newBenchServer создаёт обработчик с in-memory FileStore (без файла на диске)
 // и httptest-сервер с тем же роутером/middleware, что и боевой сервер.
+//
+// trustedSubnet пустой: эндпоинт /api/internal/stats закрыт (403 на любой
+// запрос). Отдельный helper newBenchServerWithStats нужен тем тестам,
+// которые хотят проверить работу /stats.
 func newBenchServer(tb testing.TB) *httptest.Server {
+	tb.Helper()
+	return newBenchServerWithStats(tb, "")
+}
+
+// newBenchServerWithStats — вариант newBenchServer с настраиваемой
+// доверенной подсетью для /api/internal/stats.
+func newBenchServerWithStats(tb testing.TB, trustedSubnet string) *httptest.Server {
 	tb.Helper()
 
 	store, err := storage.NewFileStore() // только память, без записи на диск
@@ -35,7 +49,15 @@ func newBenchServer(tb testing.TB) *httptest.Server {
 		tb.Fatalf("NewFileStore: %v", err)
 	}
 
-	h := NewShortenerHandler(store, benchBaseURL, 1<<20, 16, false, nil)
+	h := NewShortenerHandler(
+		store,
+		benchBaseURL,
+		1<<20,
+		16,
+		false,
+		nil,
+		trustedSubnet,
+	)
 
 	r := chi.NewRouter()
 	r.Use(auth.AuthMiddleware(benchSecret))
@@ -44,6 +66,7 @@ func newBenchServer(tb testing.TB) *httptest.Server {
 	r.Post("/api/shorten/batch", h.ShortenBatch)
 	r.Get("/api/user/urls", h.UserURLs)
 	r.Delete("/api/user/urls", h.DeleteUserURLs)
+	r.Get("/api/internal/stats", h.Stats)
 	r.Get("/{id}", h.Redirect)
 
 	srv := httptest.NewServer(r)

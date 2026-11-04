@@ -75,7 +75,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		defer auditSubject.Shutdown(2 * time.Second)
 	}
 
-	ServiceHandler := handler.NewShortenerHandler(store, cfg.BaseURL, cfg.MaxBodySize, cfg.IDLength, cfg.UseDB, auditObserver)
+	ServiceHandler := handler.NewShortenerHandler(store, cfg.BaseURL, cfg.MaxBodySize, cfg.IDLength, cfg.UseDB, auditObserver, cfg.TrustedSubnet)
 	logger.Log.Debug("Handler created")
 
 	r := chi.NewRouter()
@@ -91,6 +91,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	r.Get("/swagger/*", httpSwagger.Handler(
 		httpSwagger.URL("/swagger/doc.json"),
 	))
+	r.Get("/api/internal/stats", ServiceHandler.Stats)
 
 	// --- Защищённые роуты (требуют валидную auth-cookie) ---
 	r.Group(func(r chi.Router) {
