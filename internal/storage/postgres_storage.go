@@ -232,6 +232,38 @@ func (s *PostgresStore) GetUserURLs(ctx context.Context, userID string) ([]model
 	return urls, nil
 }
 
+// CountURLs возвращает количество активных (неудалённых) сокращённых URL.
+//
+// Мягко удалённые записи (is_deleted = TRUE) не учитываются: после
+// BatchDelete ссылка перестаёт быть «в сервисе». Реализует storage.StatsProvider.
+func (s *PostgresStore) CountURLs(ctx context.Context) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM service_data.urls WHERE is_deleted = FALSE`,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("ошибка подсчёта URL: %w", err)
+	}
+	return count, nil
+}
+
+// CountUsers возвращает количество уникальных непустых user_id,
+// владеющих хотя бы одной неудалённой ссылкой.
+//
+// Анонимные ссылки (user_id = ”) не учитываются. Реализует storage.StatsProvider.
+func (s *PostgresStore) CountUsers(ctx context.Context) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(DISTINCT user_id)
+		   FROM service_data.urls
+		  WHERE user_id <> '' AND is_deleted = FALSE`,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("ошибка подсчёта пользователей: %w", err)
+	}
+	return count, nil
+}
+
 // BatchDelete помечает несколько сокращённых ссылок как удалённые.
 //
 // Обновление выполняется в одной транзакции: либо все переданные ссылки

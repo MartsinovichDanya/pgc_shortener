@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -35,6 +36,7 @@ type ShortenerHandler struct {
 	IDLength        int
 	deleteCloseOnce sync.Once
 	UseDB           bool
+	TrustedSubnet   *net.IPNet
 }
 
 // deleteRequest — элемент очереди на удаление.
@@ -45,9 +47,29 @@ type deleteRequest struct {
 }
 
 // NewShortenerHandler – конструктор обработчиков.
-func NewShortenerHandler(store storage.Store, baseURL string, maxBodySize, idLength int, UseDB bool, auditObserver audit.Observer) *ShortenerHandler {
+func NewShortenerHandler(
+	store storage.Store,
+	baseURL string,
+	maxBodySize, idLength int,
+	useDB bool,
+	auditObserver audit.Observer,
+	trustedSubnet string,
+) *ShortenerHandler {
 	if auditObserver == nil {
 		auditObserver = audit.NoopNotifier{}
+	}
+
+	var subnet *net.IPNet
+	if ts := strings.TrimSpace(trustedSubnet); ts != "" {
+		_, parsed, err := net.ParseCIDR(ts)
+		if err != nil {
+			logger.Log.Error("invalid trusted_subnet",
+				zap.String("trusted_subnet", ts),
+				zap.Error(err),
+			)
+		} else {
+			subnet = parsed
+		}
 	}
 
 	h := &ShortenerHandler{
@@ -55,9 +77,10 @@ func NewShortenerHandler(store storage.Store, baseURL string, maxBodySize, idLen
 		BaseURL:       baseURL,
 		MaxBodySize:   maxBodySize,
 		IDLength:      idLength,
-		UseDB:         UseDB,
+		UseDB:         useDB,
 		auditObserver: auditObserver,
-		deleteCh:      make(chan deleteRequest, 1000), // буфер на 1000 элементов
+		deleteCh:      make(chan deleteRequest, 1000),
+		TrustedSubnet: subnet,
 	}
 
 	h.deleteWg.Add(1)
@@ -304,6 +327,55 @@ func (h *ShortenerHandler) PingHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// Stats godoc
+// @Summary      Внутренняя статистика сервиса
+// @Tags         internal
+// @Produce      json
+// @Param        X-Real-IP header string true "IP клиента из доверенной подсети"
+// @Success      200 {object} model.StatsResponse
+// @Failure      403 {object} model.ErrorResponse
+// @Failure      500 {object} model.ErrorResponse
+// @Router       /api/internal/stats [get]
+func (h *ShortenerHandler) Stats(w http.ResponseWriter, r *http.Request) {
+	// Пустой/невалидный trusted_subnet => доступ запрещён для всех.
+	if h.TrustedSubnet == nil {
+		writeJSONError(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+
+	ipStr := strings.TrimSpace(r.Header.Get("X-Real-IP"))
+	ip := net.ParseIP(ipStr)
+	if ip == nil || !h.TrustedSubnet.Contains(ip) {
+		writeJSONError(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+
+	urls, err := h.Store.CountURLs(r.Context())
+	if err != nil {
+		logger.Log.Error("Ошибка получения количества URL", zap.Error(err))
+		writeJSONError(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	users, err := h.Store.CountUsers(r.Context())
+	if err != nil {
+		logger.Log.Error("Ошибка получения количества пользователей", zap.Error(err))
+		writeJSONError(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	resp := model.StatsResponse{URLs: urls, Users: users}
+	jsonResp, err := easyjson.Marshal(resp)
+	if err != nil {
+		writeJSONError(w, "Ошибка формирования ответа", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(jsonResp)
 }
 
 // ShortenBatch godoc

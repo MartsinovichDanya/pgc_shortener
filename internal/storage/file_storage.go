@@ -295,6 +295,40 @@ func (s *FileStore) GetUserURLs(ctx context.Context, userID string) ([]model.Use
 	return result, nil
 }
 
+// CountURLs возвращает количество активных (неудалённых) сокращённых URL.
+//
+// Мягко удалённые записи не учитываются: после BatchDelete ссылка
+// перестаёт быть «в сервисе». Реализует storage.StatsProvider.
+func (s *FileStore) CountURLs(ctx context.Context) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	count := 0
+	for _, rec := range s.data {
+		if !rec.IsDeleted {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// CountUsers возвращает количество уникальных непустых userID,
+// владеющих хотя бы одной неудалённой ссылкой.
+//
+// Анонимные ссылки (пустой UserID) не учитываются. Реализует storage.StatsProvider.
+func (s *FileStore) CountUsers(ctx context.Context) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	seen := make(map[string]struct{})
+	for _, rec := range s.data {
+		if !rec.IsDeleted && rec.UserID != "" {
+			seen[rec.UserID] = struct{}{}
+		}
+	}
+	return len(seen), nil
+}
+
 // appendRecord дописывает одну запись в конец файла в виде JSON-строки.
 // Вызывается под уже взятым s.mu.
 func (s *FileStore) appendRecord(rec Record) error {

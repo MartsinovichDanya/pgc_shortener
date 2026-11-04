@@ -116,11 +116,45 @@ func (m *mockStore) BatchDelete(_ context.Context, ids []string, userID string) 
 	return nil
 }
 
+// CountURLs возвращает количество активных (неудалённых) ссылок.
+// Требуется интерфейсом storage.Store (используется в Stats).
+func (m *mockStore) CountURLs(_ context.Context) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	count := 0
+	for id := range m.byID {
+		if !m.deleted[id] {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// CountUsers возвращает количество уникальных непустых userID,
+// владеющих хотя бы одной неудалённой ссылкой.
+func (m *mockStore) CountUsers(_ context.Context) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	seen := make(map[string]struct{})
+	for userID, ids := range m.users {
+		if userID == "" {
+			continue
+		}
+		for _, id := range ids {
+			if !m.deleted[id] {
+				seen[userID] = struct{}{}
+				break
+			}
+		}
+	}
+	return len(seen), nil
+}
+
 // Ping не нужен при UseDB=false, но метод полезно иметь на будущее.
 func (m *mockStore) Ping(_ context.Context) error { return nil }
 
 // Close — no-op. Нужен, чтобы mockStore удовлетворял обновлённому
-// интерфейсу storage.Store (в нём появился метод Close()).
+// интерфейсу storage.Store.
 func (m *mockStore) Close() {}
 
 // ---------------------------------------------------------------------------
@@ -134,6 +168,7 @@ func newTestHandler(store storage.Store) *handler.ShortenerHandler {
 		8,                    // IDLength
 		false,                // UseDB
 		nil,                  // auditObserver (Noop внутри)
+		"",                   // trustedSubnet (эндпоинт /stats закрыт)
 	)
 }
 
@@ -308,6 +343,71 @@ func ExampleShortenerHandler_DeleteUserURLs() {
 }
 
 // ---------------------------------------------------------------------------
+// Пример: GET /api/internal/stats — статистика сервиса.
+//
+// Показывает два случая:
+//   - запрос с X-Real-IP из доверенной подсети → 200 + JSON;
+//   - запрос без заголовка / из чужой подсети → 403.
+//
+// Для эндпоинта нужен непустой trustedSubnet, поэтому здесь создаём
+// handler вручную, а не через newTestHandler.
+// ---------------------------------------------------------------------------
+func ExampleShortenerHandler_Stats() {
+	store := newMockStore()
+	_ = store.Save(context.Background(), "abc12345", "https://example.com", "user-1")
+	_ = store.Save(context.Background(), "def67890", "https://go.dev", "user-2")
+
+	h := handler.NewShortenerHandler(
+		store,
+		"http://short.local",
+		4096,
+		8,
+		false,
+		nil,
+		"192.168.0.0/16", // trustedSubnet
+	)
+	defer h.Shutdown(context.Background())
+
+	// 1. Доверенный IP.
+	req := httptest.NewRequest(http.MethodGet, "/api/internal/stats", nil)
+	req.Header.Set("X-Real-IP", "192.168.10.5")
+	rec := httptest.NewRecorder()
+	h.Stats(rec, req)
+
+	var stats model.StatsResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &stats)
+	fmt.Println("trusted:", rec.Code, stats.URLs, stats.Users)
+
+	// 2. Недоверенный IP.
+	req2 := httptest.NewRequest(http.MethodGet, "/api/internal/stats", nil)
+	req2.Header.Set("X-Real-IP", "10.0.0.1")
+	rec2 := httptest.NewRecorder()
+	h.Stats(rec2, req2)
+	fmt.Println("untrusted:", rec2.Code)
+	// Output:
+	// trusted: 200 2 2
+	// untrusted: 403
+}
+
+// ---------------------------------------------------------------------------
+// Пример: GET /api/internal/stats при пустом trusted_subnet → всегда 403.
+// ---------------------------------------------------------------------------
+func ExampleShortenerHandler_Stats_noSubnet() {
+	store := newMockStore()
+	h := newTestHandler(store) // trustedSubnet = ""
+	defer h.Shutdown(context.Background())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/internal/stats", nil)
+	req.Header.Set("X-Real-IP", "192.168.10.5") // даже «правильный» IP не поможет
+	rec := httptest.NewRecorder()
+	h.Stats(rec, req)
+
+	fmt.Println("Status:", rec.Code)
+	// Output:
+	// Status: 403
+}
+
+// ---------------------------------------------------------------------------
 // Пример: полный цикл через реальный роутер (httptest.Server).
 //
 // Показывает, как эндпоинты ведут себя вместе с маршрутизацией chi
@@ -328,6 +428,7 @@ func Example_fullFlow() {
 		8,
 		false,
 		nil,
+		"", // trustedSubnet
 	)
 	defer h.Shutdown(context.Background())
 
