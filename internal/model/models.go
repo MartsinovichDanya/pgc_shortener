@@ -9,7 +9,7 @@ type Request struct {
 	URL string `json:"url" example:"https://example.com"`
 }
 
-// Response — ответ с короткой ссылкой.
+// Response — ответ с короткой ссылкой (POST /, POST /api/shorten).
 //
 //easyjson:json
 type Response struct {
@@ -24,7 +24,7 @@ type BatchRequestItem struct {
 	OriginalURL   string `json:"original_url" example:"https://example.com"`
 }
 
-// BatchResponseItem — элемент пакетного ответа.
+// BatchResponseItem — элемент пакетного ответа (POST /api/shorten/batch).
 //
 //easyjson:json
 type BatchResponseItem struct {
@@ -40,6 +40,17 @@ type UserURL struct {
 	OriginalURL string `json:"original_url" example:"https://example.com"`
 }
 
+// ErrorResponse — ответ с описанием ошибки.
+//
+//easyjson:json
 type ErrorResponse struct {
 	Error string `json:"error" example:"Некорректный URL"`
+}
+
+// StatsResponse — внутренняя статистика сервиса (GET /api/internal/stats).
+//
+//easyjson:json
+type StatsResponse struct {
+	URLs  int `json:"urls" example:"123"`
+	Users int `json:"users" example:"45"`
 }

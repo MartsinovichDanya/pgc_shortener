@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -20,6 +21,9 @@ const (
 
 const cookieName = "user_token"
 
+// ErrInvalidToken возвращается ValidateToken при некорректной подписи/формате.
+var ErrInvalidToken = errors.New("invalid token")
+
 // AuthMiddleware возвращает middleware для аутентификации через подписанную куку.
 func AuthMiddleware(secret string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -28,34 +32,24 @@ func AuthMiddleware(secret string) func(http.Handler) http.Handler {
 			var tokenInvalid bool
 
 			cookie, err := r.Cookie(cookieName)
-			if err != nil {
+			switch {
+			case err != nil:
 				// Кука отсутствует – создаём нового пользователя.
 				userID = uuid.NewString()
-			} else {
-				// Кука есть – проверяем подпись.
-				parts := strings.SplitN(cookie.Value, ":", 2)
-				if len(parts) != 2 {
+			default:
+				uid, verr := ValidateToken(cookie.Value, secret)
+				if verr != nil {
 					tokenInvalid = true
-				} else {
-					uid, signature := parts[0], parts[1]
-					if !validSignature(uid, signature, secret) {
-						tokenInvalid = true
-					} else {
-						userID = uid
-					}
-				}
-				// Если кука невалидна, генерируем нового пользователя для остальных эндпоинтов,
-				// но помечаем контекст для возможной обработки 401.
-				if tokenInvalid {
 					userID = uuid.NewString()
+				} else {
+					userID = uid
 				}
 			}
 
 			// Устанавливаем или обновляем куку с новым userID.
-			signedValue := signUserID(userID, secret)
 			http.SetCookie(w, &http.Cookie{
 				Name:     cookieName,
-				Value:    signedValue,
+				Value:    SignUserID(userID, secret),
 				Path:     "/",
 				HttpOnly: true,
 				Secure:   false,
@@ -72,15 +66,36 @@ func AuthMiddleware(secret string) func(http.Handler) http.Handler {
 	}
 }
 
+// ValidateToken проверяет токен формата "userID:hex(HMAC-SHA256(userID, secret))"
+// и возвращает userID. Используется и HTTP-middleware (косвенно), и gRPC-interceptor.
+func ValidateToken(token, secret string) (string, error) {
+	token = strings.TrimSpace(token)
+	parts := strings.SplitN(token, ":", 2)
+	if len(parts) != 2 {
+		return "", ErrInvalidToken
+	}
+	userID, signature := parts[0], parts[1]
+	if userID == "" || !validSignature(userID, signature, secret) {
+		return "", ErrInvalidToken
+	}
+	return userID, nil
+}
+
+// SignUserID возвращает подписанный токен "userID:signature".
+// Парная к ValidateToken; нужна HTTP-middleware и gRPC-клиентам.
+func SignUserID(userID, secret string) string {
+	return signUserID(userID, secret)
+}
+
 // signUserID возвращает строку вида "userID:HMAC-SHA256(userID, secret)".
 func signUserID(userID, secret string) string {
 	secretBytes := []byte(secret)
 	mac := hmac.New(sha256.New, secretBytes)
 	mac.Write([]byte(userID))
-	sum := mac.Sum(nil) // 32 байта в буфере hash — одна аллокация
+	sum := mac.Sum(nil)
 	sig := make([]byte, hex.EncodedLen(len(sum)))
 	hex.Encode(sig, sum)
-	return userID + ":" + string(sig) // одна конкатенация вместо промежуточных строк
+	return userID + ":" + string(sig)
 }
 
 // validSignature проверяет подпись без hex-строки expected.

@@ -17,6 +17,7 @@ import (
 	"github.com/MartsinovichDanya/pgc_shortener/internal/auth"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/handler"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/model"
+	"github.com/MartsinovichDanya/pgc_shortener/internal/service"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/storage"
 )
 
@@ -26,6 +27,11 @@ const (
 	testIDLength     = 8
 	testUseDB        = false
 	testCookieSecret = "secret123"
+
+	// testTrustedSubnet — доверенная подсеть, используемая только в тестах
+	// /api/internal/stats. В остальных тестах trusted_subnet пустой,
+	// поэтому эндпоинт закрыт (403).
+	testTrustedSubnet = "192.168.0.0/16"
 )
 
 // testRequest выполняет HTTP-запрос к тестовому серверу и возвращает ответ и тело.
@@ -80,6 +86,33 @@ func testRequestWithCookie(t *testing.T, ts *httptest.Server, method, path strin
 	return resp, string(respBody)
 }
 
+// testRequestWithHeaders выполняет GET-запрос с заданными заголовками.
+//
+//bodyclose:handled
+func testRequestWithHeaders(t *testing.T, ts *httptest.Server, method, path string, headers map[string]string) (*http.Response, string) {
+	t.Helper()
+	req, err := http.NewRequest(method, ts.URL+path, nil)
+	require.NoError(t, err)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	client := &http.Client{
+		Transport: ts.Client().Transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp, string(respBody)
+}
+
 // getCookieFromResponse извлекает куку user_token из ответа.
 func getCookieFromResponse(t *testing.T, resp *http.Response) *http.Cookie {
 	t.Helper()
@@ -102,17 +135,23 @@ func getIDFromResponse(t *testing.T, body string) string {
 }
 
 // newTestRouter создаёт chi.Router с middleware аутентификации.
+// trustedSubnet передаётся в конструктор хендлера; пустая строка
+// закрывает /api/internal/stats (403 на любой запрос).
 // Возвращает роутер и хендлер, чтобы вызывающая сторона могла корректно
 // освободить ресурсы (закрыть сервер и остановить фоновый воркер).
-func newTestRouter(store storage.Store) (http.Handler, *handler.ShortenerHandler) {
-	// nil → конструктор подменит на audit.NoopNotifier{} (аудит выключен).
+func newTestRouter(store storage.Store, trustedSubnet string) (http.Handler, *handler.ShortenerHandler) {
+	// svc — общая бизнес-логика; nil в auditObserver заменяется
+	// внутри service.New на audit.NoopNotifier{} (аудит выключен).
+	svc := service.New(store, testBaseURL, testIDLength, nil)
+
 	h := handler.NewShortenerHandler(
 		store,
+		svc,
 		testBaseURL,
 		testMaxBodySize,
 		testIDLength,
 		testUseDB,
-		nil,
+		trustedSubnet,
 	)
 
 	r := chi.NewRouter()
@@ -124,6 +163,7 @@ func newTestRouter(store storage.Store) (http.Handler, *handler.ShortenerHandler
 	r.Post("/api/shorten", h.ShortenAPI)
 	r.Post("/api/shorten/batch", h.ShortenBatch)
 	r.Delete("/api/user/urls", h.DeleteUserURLs)
+	r.Get("/api/internal/stats", h.Stats)
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Некорректный запрос", http.StatusBadRequest)
@@ -135,11 +175,18 @@ func newTestRouter(store storage.Store) (http.Handler, *handler.ShortenerHandler
 	return r, h
 }
 
-// newTestServer поднимает тестовый сервер и регистрирует очистку:
-// сначала закрываем httptest.Server, затем останавливаем фоновый воркер хендлера.
+// newTestServer поднимает тестовый сервер и регистрирует очистку.
+// trusted_subnet пустой: /api/internal/stats отвечает 403.
 func newTestServer(t *testing.T, store storage.Store) *httptest.Server {
 	t.Helper()
-	router, h := newTestRouter(store)
+	return newTestServerWithStats(t, store, "")
+}
+
+// newTestServerWithStats — вариант newTestServer с настраиваемой
+// доверенной подсетью для /api/internal/stats.
+func newTestServerWithStats(t *testing.T, store storage.Store, trustedSubnet string) *httptest.Server {
+	t.Helper()
+	router, h := newTestRouter(store, trustedSubnet)
 	ts := httptest.NewServer(router)
 	t.Cleanup(func() {
 		ts.Close()
@@ -589,4 +636,116 @@ func TestServeHTTP_PostToInvalidPath(t *testing.T) {
 
 	resp, _ := testRequest(t, ts, http.MethodPost, "/somepath", nil)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+// ---------- Stats ----------
+
+func TestStats_ForbiddenWhenSubnetEmpty(t *testing.T) {
+	store, _ := storage.NewFileStore()
+	ts := newTestServer(t, store) // trustedSubnet = ""
+
+	resp, body := testRequestWithHeaders(t, ts, http.MethodGet, "/api/internal/stats", map[string]string{
+		"X-Real-IP": "192.168.10.5", // даже «правильный» IP не помогает
+	})
+
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	assert.Contains(t, body, "Forbidden")
+}
+
+func TestStats_ForbiddenWithoutHeader(t *testing.T) {
+	store, _ := storage.NewFileStore()
+	ts := newTestServerWithStats(t, store, testTrustedSubnet)
+
+	resp, body := testRequest(t, ts, http.MethodGet, "/api/internal/stats", nil)
+
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	assert.Contains(t, body, "Forbidden")
+}
+
+func TestStats_ForbiddenWrongIP(t *testing.T) {
+	store, _ := storage.NewFileStore()
+	ts := newTestServerWithStats(t, store, testTrustedSubnet)
+
+	resp, body := testRequestWithHeaders(t, ts, http.MethodGet, "/api/internal/stats", map[string]string{
+		"X-Real-IP": "10.0.0.1", // вне 192.168.0.0/16
+	})
+
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	assert.Contains(t, body, "Forbidden")
+}
+
+func TestStats_ForbiddenInvalidIP(t *testing.T) {
+	store, _ := storage.NewFileStore()
+	ts := newTestServerWithStats(t, store, testTrustedSubnet)
+
+	resp, body := testRequestWithHeaders(t, ts, http.MethodGet, "/api/internal/stats", map[string]string{
+		"X-Real-IP": "not-an-ip",
+	})
+
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	assert.Contains(t, body, "Forbidden")
+}
+
+func TestStats_OK(t *testing.T) {
+	store, _ := storage.NewFileStore()
+	ts := newTestServerWithStats(t, store, testTrustedSubnet)
+
+	// user A: две ссылки (вторая с кукой, чтобы точно принадлежала A)
+	respA, _ := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/a1"))
+	require.Equal(t, http.StatusCreated, respA.StatusCode)
+	cookieA := getCookieFromResponse(t, respA)
+	require.NotNil(t, cookieA)
+
+	respA2, _ := testRequestWithCookie(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/a2"), cookieA)
+	require.Equal(t, http.StatusCreated, respA2.StatusCode)
+
+	// user B: одна ссылка (новый запрос без куки → middleware выдаёт нового userID)
+	respB, _ := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/b1"))
+	require.Equal(t, http.StatusCreated, respB.StatusCode)
+
+	resp, body := testRequestWithHeaders(t, ts, http.MethodGet, "/api/internal/stats", map[string]string{
+		"X-Real-IP": "192.168.10.5",
+	})
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+
+	var stats model.StatsResponse
+	require.NoError(t, json.Unmarshal([]byte(body), &stats))
+	assert.Equal(t, 3, stats.URLs, "должно быть 3 активных ссылки")
+	assert.Equal(t, 2, stats.Users, "должно быть 2 пользователя (A и B)")
+}
+
+func TestStats_AfterDelete(t *testing.T) {
+	store, _ := storage.NewFileStore()
+	ts := newTestServerWithStats(t, store, testTrustedSubnet)
+
+	// Создаём две ссылки у одного пользователя.
+	respA1, body1 := testRequest(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/d1"))
+	require.Equal(t, http.StatusCreated, respA1.StatusCode)
+	cookieA := getCookieFromResponse(t, respA1)
+	require.NotNil(t, cookieA)
+
+	respA2, _ := testRequestWithCookie(t, ts, http.MethodPost, "/", strings.NewReader("https://example.com/d2"), cookieA)
+	require.Equal(t, http.StatusCreated, respA2.StatusCode)
+
+	id1 := getIDFromResponse(t, body1)
+
+	// Удаляем одну ссылку и дожидаемся применения.
+	delBody := `["` + id1 + `"]`
+	respDel, _ := testRequestWithCookie(t, ts, http.MethodDelete, "/api/user/urls", strings.NewReader(delBody), cookieA)
+	require.Equal(t, http.StatusAccepted, respDel.StatusCode)
+	waitForDeletion(t, store, id1, 2*time.Second)
+
+	// Статистика должна уменьшиться на удалённую ссылку; пользователь
+	// остаётся в подсчёте, пока у него есть хотя бы одна активная ссылка.
+	resp, body := testRequestWithHeaders(t, ts, http.MethodGet, "/api/internal/stats", map[string]string{
+		"X-Real-IP": "192.168.10.5",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var stats model.StatsResponse
+	require.NoError(t, json.Unmarshal([]byte(body), &stats))
+	assert.Equal(t, 1, stats.URLs, "после удаления одной из двух ссылок остаётся одна активная")
+	assert.Equal(t, 1, stats.Users, "пользователь остаётся в подсчёте, пока у него есть активная ссылка")
 }
