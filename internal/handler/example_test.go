@@ -13,6 +13,7 @@ import (
 	"github.com/MartsinovichDanya/pgc_shortener/internal/auth"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/handler"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/model"
+	"github.com/MartsinovichDanya/pgc_shortener/internal/service"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/storage"
 	"github.com/go-chi/chi/v5"
 )
@@ -161,13 +162,15 @@ func (m *mockStore) Close() {}
 // Вспомогательный конструктор обработчика для примеров.
 // ---------------------------------------------------------------------------
 func newTestHandler(store storage.Store) *handler.ShortenerHandler {
+	svc := service.New(store, "http://short.local", 8, nil)
+
 	return handler.NewShortenerHandler(
 		store,
+		svc,
 		"http://short.local", // BaseURL
 		4096,                 // MaxBodySize
 		8,                    // IDLength
 		false,                // UseDB
-		nil,                  // auditObserver (Noop внутри)
 		"",                   // trustedSubnet (эндпоинт /stats закрыт)
 	)
 }
@@ -357,13 +360,15 @@ func ExampleShortenerHandler_Stats() {
 	_ = store.Save(context.Background(), "abc12345", "https://example.com", "user-1")
 	_ = store.Save(context.Background(), "def67890", "https://go.dev", "user-2")
 
+	svc := service.New(store, "http://short.local", 8, nil)
+
 	h := handler.NewShortenerHandler(
 		store,
+		svc,
 		"http://short.local",
 		4096,
 		8,
 		false,
-		nil,
 		"192.168.0.0/16", // trustedSubnet
 	)
 	defer h.Shutdown(context.Background())
@@ -421,13 +426,15 @@ func Example_fullFlow() {
 	defer srv.Close()
 
 	// Теперь знаем реальный BaseURL тестового сервера.
+	svc := service.New(store, srv.URL, 8, nil)
+
 	h := handler.NewShortenerHandler(
 		store,
+		svc,
 		srv.URL, // <-- BaseURL = адрес httptest-сервера
 		4096,
 		8,
 		false,
-		nil,
 		"", // trustedSubnet
 	)
 	defer h.Shutdown(context.Background())

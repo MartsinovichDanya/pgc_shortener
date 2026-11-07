@@ -17,6 +17,7 @@ import (
 	"github.com/MartsinovichDanya/pgc_shortener/internal/auth"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/handler"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/model"
+	"github.com/MartsinovichDanya/pgc_shortener/internal/service"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/storage"
 )
 
@@ -139,14 +140,17 @@ func getIDFromResponse(t *testing.T, body string) string {
 // Возвращает роутер и хендлер, чтобы вызывающая сторона могла корректно
 // освободить ресурсы (закрыть сервер и остановить фоновый воркер).
 func newTestRouter(store storage.Store, trustedSubnet string) (http.Handler, *handler.ShortenerHandler) {
-	// nil → конструктор подменит на audit.NoopNotifier{} (аудит выключен).
+	// svc — общая бизнес-логика; nil в auditObserver заменяется
+	// внутри service.New на audit.NoopNotifier{} (аудит выключен).
+	svc := service.New(store, testBaseURL, testIDLength, nil)
+
 	h := handler.NewShortenerHandler(
 		store,
+		svc,
 		testBaseURL,
 		testMaxBodySize,
 		testIDLength,
 		testUseDB,
-		nil,
 		trustedSubnet,
 	)
 

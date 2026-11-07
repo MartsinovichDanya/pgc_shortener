@@ -16,6 +16,7 @@ import (
 
 	"github.com/MartsinovichDanya/pgc_shortener/internal/auth"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/model"
+	"github.com/MartsinovichDanya/pgc_shortener/internal/service"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/storage"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/utils"
 )
@@ -49,13 +50,15 @@ func newBenchServerWithStats(tb testing.TB, trustedSubnet string) *httptest.Serv
 		tb.Fatalf("NewFileStore: %v", err)
 	}
 
+	svc := service.New(store, benchBaseURL, 16, nil)
+
 	h := NewShortenerHandler(
 		store,
+		svc,
 		benchBaseURL,
 		1<<20,
 		16,
 		false,
-		nil,
 		trustedSubnet,
 	)
 
