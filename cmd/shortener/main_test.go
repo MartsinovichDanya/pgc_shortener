@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MartsinovichDanya/pgc_shortener/internal/middleware"
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -140,8 +141,6 @@ func getIDFromResponse(t *testing.T, body string) string {
 // Возвращает роутер и хендлер, чтобы вызывающая сторона могла корректно
 // освободить ресурсы (закрыть сервер и остановить фоновый воркер).
 func newTestRouter(store storage.Store, trustedSubnet string) (http.Handler, *handler.ShortenerHandler) {
-	// svc — общая бизнес-логика; nil в auditObserver заменяется
-	// внутри service.New на audit.NoopNotifier{} (аудит выключен).
 	svc := service.New(store, testBaseURL, testIDLength, nil)
 
 	h := handler.NewShortenerHandler(
@@ -151,7 +150,6 @@ func newTestRouter(store storage.Store, trustedSubnet string) (http.Handler, *ha
 		testMaxBodySize,
 		testIDLength,
 		testUseDB,
-		trustedSubnet,
 	)
 
 	r := chi.NewRouter()
@@ -163,7 +161,7 @@ func newTestRouter(store storage.Store, trustedSubnet string) (http.Handler, *ha
 	r.Post("/api/shorten", h.ShortenAPI)
 	r.Post("/api/shorten/batch", h.ShortenBatch)
 	r.Delete("/api/user/urls", h.DeleteUserURLs)
-	r.Get("/api/internal/stats", h.Stats)
+	r.With(middleware.TrustedSubnet(trustedSubnet)).Get("/api/internal/stats", h.Stats)
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Некорректный запрос", http.StatusBadRequest)

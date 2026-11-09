@@ -12,6 +12,7 @@ import (
 
 	"github.com/MartsinovichDanya/pgc_shortener/internal/auth"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/handler"
+	"github.com/MartsinovichDanya/pgc_shortener/internal/middleware"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/model"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/service"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/storage"
@@ -167,11 +168,10 @@ func newTestHandler(store storage.Store) *handler.ShortenerHandler {
 	return handler.NewShortenerHandler(
 		store,
 		svc,
-		"http://short.local", // BaseURL
-		4096,                 // MaxBodySize
-		8,                    // IDLength
-		false,                // UseDB
-		"",                   // trustedSubnet (эндпоинт /stats закрыт)
+		"http://short.local",
+		4096,
+		8,
+		false,
 	)
 }
 
@@ -360,24 +360,18 @@ func ExampleShortenerHandler_Stats() {
 	_ = store.Save(context.Background(), "abc12345", "https://example.com", "user-1")
 	_ = store.Save(context.Background(), "def67890", "https://go.dev", "user-2")
 
-	svc := service.New(store, "http://short.local", 8, nil)
-
-	h := handler.NewShortenerHandler(
-		store,
-		svc,
-		"http://short.local",
-		4096,
-		8,
-		false,
-		"192.168.0.0/16", // trustedSubnet
-	)
+	h := newTestHandler(store)
 	defer h.Shutdown(context.Background())
+
+	r := chi.NewRouter()
+	r.With(middleware.TrustedSubnet("192.168.0.0/16")).
+		Get("/api/internal/stats", h.Stats)
 
 	// 1. Доверенный IP.
 	req := httptest.NewRequest(http.MethodGet, "/api/internal/stats", nil)
 	req.Header.Set("X-Real-IP", "192.168.10.5")
 	rec := httptest.NewRecorder()
-	h.Stats(rec, req)
+	r.ServeHTTP(rec, req)
 
 	var stats model.StatsResponse
 	_ = json.Unmarshal(rec.Body.Bytes(), &stats)
@@ -387,7 +381,7 @@ func ExampleShortenerHandler_Stats() {
 	req2 := httptest.NewRequest(http.MethodGet, "/api/internal/stats", nil)
 	req2.Header.Set("X-Real-IP", "10.0.0.1")
 	rec2 := httptest.NewRecorder()
-	h.Stats(rec2, req2)
+	r.ServeHTTP(rec2, req2)
 	fmt.Println("untrusted:", rec2.Code)
 	// Output:
 	// trusted: 200 2 2
@@ -399,13 +393,17 @@ func ExampleShortenerHandler_Stats() {
 // ---------------------------------------------------------------------------
 func ExampleShortenerHandler_Stats_noSubnet() {
 	store := newMockStore()
-	h := newTestHandler(store) // trustedSubnet = ""
+	h := newTestHandler(store)
 	defer h.Shutdown(context.Background())
 
+	r := chi.NewRouter()
+	r.With(middleware.TrustedSubnet("")). // пустой spec => все запросы 403
+						Get("/api/internal/stats", h.Stats)
+
 	req := httptest.NewRequest(http.MethodGet, "/api/internal/stats", nil)
-	req.Header.Set("X-Real-IP", "192.168.10.5") // даже «правильный» IP не поможет
+	req.Header.Set("X-Real-IP", "192.168.10.5")
 	rec := httptest.NewRecorder()
-	h.Stats(rec, req)
+	r.ServeHTTP(rec, req)
 
 	fmt.Println("Status:", rec.Code)
 	// Output:
@@ -431,11 +429,10 @@ func Example_fullFlow() {
 	h := handler.NewShortenerHandler(
 		store,
 		svc,
-		srv.URL, // <-- BaseURL = адрес httptest-сервера
+		srv.URL,
 		4096,
 		8,
 		false,
-		"", // trustedSubnet
 	)
 	defer h.Shutdown(context.Background())
 

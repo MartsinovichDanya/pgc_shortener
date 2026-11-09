@@ -29,6 +29,18 @@ func New(svc *service.Service) *Server {
 	return &Server{svc: svc}
 }
 
+// userIDFromContext единообразно извлекает userID из контекста.
+// Возвращает Unauthenticated, если userID отсутствует или пуст —
+// одинаково для всех RPC, чтобы нельзя было сохранить ссылку без владельца
+// или выполнить действие от анонима.
+func userIDFromContext(ctx context.Context) (string, error) {
+	userID, ok := ctx.Value(auth.UserIDKey).(string)
+	if !ok || userID == "" {
+		return "", status.Error(codes.Unauthenticated, "unauthorized")
+	}
+	return userID, nil
+}
+
 // ShortenURL создаёт короткую ссылку.
 func (s *Server) ShortenURL(ctx context.Context, req *pb.URLShortenRequest) (*pb.URLShortenResponse, error) {
 	originalURL := req.GetUrl()
@@ -36,7 +48,10 @@ func (s *Server) ShortenURL(ctx context.Context, req *pb.URLShortenRequest) (*pb
 		return nil, status.Error(codes.InvalidArgument, "url is required")
 	}
 
-	userID, _ := ctx.Value(auth.UserIDKey).(string)
+	userID, err := userIDFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	shortURL, _, err := s.svc.Shorten(ctx, originalURL, userID)
 	if err != nil {
@@ -53,7 +68,10 @@ func (s *Server) ExpandURL(ctx context.Context, req *pb.URLExpandRequest) (*pb.U
 		return nil, status.Error(codes.InvalidArgument, "id is required")
 	}
 
-	userID, _ := ctx.Value(auth.UserIDKey).(string)
+	userID, err := userIDFromContext(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	originalURL, err := s.svc.Expand(ctx, id, userID)
 	if err != nil {
@@ -67,11 +85,11 @@ func (s *Server) ExpandURL(ctx context.Context, req *pb.URLExpandRequest) (*pb.U
 	return &pb.URLExpandResponse{Result: originalURL}, nil
 }
 
-// ListUserURLs возвращает ссылки текущего пользователя (userID из интерсептора).
+// ListUserURLs возвращает ссылки текущего пользователя.
 func (s *Server) ListUserURLs(ctx context.Context, _ *emptypb.Empty) (*pb.UserURLsResponse, error) {
-	userID, ok := ctx.Value(auth.UserIDKey).(string)
-	if !ok || userID == "" {
-		return nil, status.Error(codes.Unauthenticated, "unauthorized")
+	userID, err := userIDFromContext(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	urls, err := s.svc.ListByUser(ctx, userID)

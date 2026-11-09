@@ -89,6 +89,21 @@ func (s *Service) ListByUser(ctx context.Context, userID string) ([]model.UserUR
 	return urls, nil
 }
 
+// Stats возвращает агрегированную статистику сервиса.
+// Используется и HTTP-хендлером /api/internal/stats — тот больше
+// не ходит в store напрямую.
+func (s *Service) Stats(ctx context.Context) (urls int, users int, err error) {
+	urls, err = s.store.CountURLs(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	users, err = s.store.CountUsers(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	return urls, users, nil
+}
+
 // BaseURL и IDLength — для HTTP-хендлера, который использует их в batch.
 func (s *Service) BaseURL() string { return s.baseURL }
 func (s *Service) IDLength() int   { return s.idLength }

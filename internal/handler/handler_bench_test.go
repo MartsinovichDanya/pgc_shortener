@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MartsinovichDanya/pgc_shortener/internal/middleware"
 	"github.com/go-chi/chi/v5"
 
 	"github.com/MartsinovichDanya/pgc_shortener/internal/auth"
@@ -45,7 +46,7 @@ func newBenchServer(tb testing.TB) *httptest.Server {
 func newBenchServerWithStats(tb testing.TB, trustedSubnet string) *httptest.Server {
 	tb.Helper()
 
-	store, err := storage.NewFileStore() // только память, без записи на диск
+	store, err := storage.NewFileStore()
 	if err != nil {
 		tb.Fatalf("NewFileStore: %v", err)
 	}
@@ -59,7 +60,6 @@ func newBenchServerWithStats(tb testing.TB, trustedSubnet string) *httptest.Serv
 		1<<20,
 		16,
 		false,
-		trustedSubnet,
 	)
 
 	r := chi.NewRouter()
@@ -69,15 +69,13 @@ func newBenchServerWithStats(tb testing.TB, trustedSubnet string) *httptest.Serv
 	r.Post("/api/shorten/batch", h.ShortenBatch)
 	r.Get("/api/user/urls", h.UserURLs)
 	r.Delete("/api/user/urls", h.DeleteUserURLs)
-	r.Get("/api/internal/stats", h.Stats)
+	r.With(middleware.TrustedSubnet(trustedSubnet)).Get("/api/internal/stats", h.Stats)
 	r.Get("/{id}", h.Redirect)
 
 	srv := httptest.NewServer(r)
 	tb.Cleanup(func() {
 		srv.Close()
 
-		// Даём воркеру разумный таймаут на финальный flush, чтобы
-		// зависший BatchDelete не подвесил завершение бенчмарка.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		h.Shutdown(ctx)

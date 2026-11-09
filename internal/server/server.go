@@ -91,7 +91,7 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	h := handler.NewShortenerHandler(
 		store, svc,
 		cfg.BaseURL, cfg.MaxBodySize, cfg.IDLength,
-		cfg.UseDB, cfg.TrustedSubnet,
+		cfg.UseDB,
 	)
 	httpSrv := &http.Server{
 		Addr:    cfg.ServerAddr,
@@ -195,7 +195,11 @@ func buildHTTPRouter(cfg *config.Config, h *handler.ShortenerHandler) http.Handl
 
 	// Публичные роуты
 	r.Get("/swagger/*", httpSwagger.Handler(httpSwagger.URL("/swagger/doc.json")))
-	r.Get("/api/internal/stats", h.Stats)
+
+	// /stats защищён проверкой доверенной подсети.
+	// Пустой/невалидный trusted_subnet => middleware отклоняет все запросы.
+	r.With(middleware.TrustedSubnet(cfg.TrustedSubnet)).
+		Get("/api/internal/stats", h.Stats)
 
 	// Защищённые роуты
 	r.Group(func(r chi.Router) {
