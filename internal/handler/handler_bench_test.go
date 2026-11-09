@@ -12,10 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MartsinovichDanya/pgc_shortener/internal/middleware"
 	"github.com/go-chi/chi/v5"
 
 	"github.com/MartsinovichDanya/pgc_shortener/internal/auth"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/model"
+	"github.com/MartsinovichDanya/pgc_shortener/internal/service"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/storage"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/utils"
 )
@@ -23,19 +25,42 @@ import (
 const (
 	benchSecret  = "bench-secret"
 	benchBaseURL = "http://localhost:8080"
+
+	// benchTrustedSubnet — доверенная подсеть, используемая в тестах /stats.
+	benchTrustedSubnet = "192.168.0.0/16"
 )
 
 // newBenchServer создаёт обработчик с in-memory FileStore (без файла на диске)
 // и httptest-сервер с тем же роутером/middleware, что и боевой сервер.
+//
+// trustedSubnet пустой: эндпоинт /api/internal/stats закрыт (403 на любой
+// запрос). Отдельный helper newBenchServerWithStats нужен тем тестам,
+// которые хотят проверить работу /stats.
 func newBenchServer(tb testing.TB) *httptest.Server {
 	tb.Helper()
+	return newBenchServerWithStats(tb, "")
+}
 
-	store, err := storage.NewFileStore() // только память, без записи на диск
+// newBenchServerWithStats — вариант newBenchServer с настраиваемой
+// доверенной подсетью для /api/internal/stats.
+func newBenchServerWithStats(tb testing.TB, trustedSubnet string) *httptest.Server {
+	tb.Helper()
+
+	store, err := storage.NewFileStore()
 	if err != nil {
 		tb.Fatalf("NewFileStore: %v", err)
 	}
 
-	h := NewShortenerHandler(store, benchBaseURL, 1<<20, 16, false, nil)
+	svc := service.New(store, benchBaseURL, 16, nil)
+
+	h := NewShortenerHandler(
+		store,
+		svc,
+		benchBaseURL,
+		1<<20,
+		16,
+		false,
+	)
 
 	r := chi.NewRouter()
 	r.Use(auth.AuthMiddleware(benchSecret))
@@ -44,14 +69,13 @@ func newBenchServer(tb testing.TB) *httptest.Server {
 	r.Post("/api/shorten/batch", h.ShortenBatch)
 	r.Get("/api/user/urls", h.UserURLs)
 	r.Delete("/api/user/urls", h.DeleteUserURLs)
+	r.With(middleware.TrustedSubnet(trustedSubnet)).Get("/api/internal/stats", h.Stats)
 	r.Get("/{id}", h.Redirect)
 
 	srv := httptest.NewServer(r)
 	tb.Cleanup(func() {
 		srv.Close()
 
-		// Даём воркеру разумный таймаут на финальный flush, чтобы
-		// зависший BatchDelete не подвесил завершение бенчмарка.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		h.Shutdown(ctx)

@@ -16,10 +16,10 @@ import (
 	"github.com/mailru/easyjson"
 	"go.uber.org/zap"
 
-	"github.com/MartsinovichDanya/pgc_shortener/internal/audit"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/auth"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/logger"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/model"
+	"github.com/MartsinovichDanya/pgc_shortener/internal/service"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/storage"
 	"github.com/MartsinovichDanya/pgc_shortener/internal/utils"
 )
@@ -27,7 +27,7 @@ import (
 // ShortenerHandler содержит зависимости HTTP-обработчиков.
 type ShortenerHandler struct {
 	Store           storage.Store
-	auditObserver   audit.Observer
+	svc             *service.Service
 	deleteCh        chan deleteRequest
 	BaseURL         string
 	deleteWg        sync.WaitGroup
@@ -45,19 +45,23 @@ type deleteRequest struct {
 }
 
 // NewShortenerHandler – конструктор обработчиков.
-func NewShortenerHandler(store storage.Store, baseURL string, maxBodySize, idLength int, UseDB bool, auditObserver audit.Observer) *ShortenerHandler {
-	if auditObserver == nil {
-		auditObserver = audit.NoopNotifier{}
-	}
-
+// Сервис (общая бизнес-логика с gRPC) передаётся готовым — хендлер его не
+// создаёт и ничего не знает про audit/observer.
+func NewShortenerHandler(
+	store storage.Store,
+	svc *service.Service,
+	baseURL string,
+	maxBodySize, idLength int,
+	useDB bool,
+) *ShortenerHandler {
 	h := &ShortenerHandler{
-		Store:         store,
-		BaseURL:       baseURL,
-		MaxBodySize:   maxBodySize,
-		IDLength:      idLength,
-		UseDB:         UseDB,
-		auditObserver: auditObserver,
-		deleteCh:      make(chan deleteRequest, 1000), // буфер на 1000 элементов
+		Store:       store,
+		svc:         svc,
+		BaseURL:     baseURL,
+		MaxBodySize: maxBodySize,
+		IDLength:    idLength,
+		UseDB:       useDB,
+		deleteCh:    make(chan deleteRequest, 1000),
 	}
 
 	h.deleteWg.Add(1)
@@ -66,11 +70,6 @@ func NewShortenerHandler(store storage.Store, baseURL string, maxBodySize, idLen
 }
 
 // Shutdown корректно останавливает фоновый воркер удаления.
-//
-// close(deleteCh) сигнализирует воркеру дочитать канал и сделать финальный
-// flush. Ждём завершения воркера через отдельную горутину, чтобы уважать
-// таймаут ctx: если BatchDelete завис (БД недоступна и т.п.), не блокируем
-// весь graceful shutdown сервера.
 func (h *ShortenerHandler) Shutdown(ctx context.Context) {
 	h.deleteCloseOnce.Do(func() {
 		close(h.deleteCh)
@@ -121,42 +120,20 @@ func (h *ShortenerHandler) CreateShortLink(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	id, err := utils.GenerateID(h.IDLength)
-	if err != nil {
-		logger.Log.Debug("Ошибка генерации ID", zap.Error(err))
-		http.Error(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
-		return
-	}
-
-	// Извлекаем userID из контекста (установлен middleware)
 	userID, _ := r.Context().Value(auth.UserIDKey).(string)
 
-	// Сохраняем с привязкой к пользователю
-	if err := h.Store.Save(r.Context(), id, originalURL, userID); err != nil {
-		if errors.Is(err, storage.ErrURLExists) {
-			existingShort, errGet := h.Store.GetByOriginalURL(r.Context(), originalURL)
-			if errGet != nil {
-				logger.Log.Error("Ошибка получения существующего URL", zap.Error(errGet))
-				http.Error(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
-				return
-			}
-			fullShortURL := joinShortURL(h.BaseURL, existingShort)
-			w.Header().Set("Content-Type", "text/plain")
-			w.WriteHeader(http.StatusConflict)
-			fmt.Fprint(w, fullShortURL)
-			return
-		}
-		logger.Log.Error("Ошибка сохранения URL", zap.Error(err))
+	shortURL, exists, err := h.svc.Shorten(r.Context(), originalURL, userID)
+	if err != nil {
 		http.Error(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
 		return
 	}
 
-	shortURL := joinShortURL(h.BaseURL, id)
-
-	h.auditObserver.Notify(audit.NewEvent(audit.ActionShorten, userID, originalURL))
-
 	w.Header().Set("Content-Type", "text/plain")
-	w.WriteHeader(http.StatusCreated)
+	if exists {
+		w.WriteHeader(http.StatusConflict)
+	} else {
+		w.WriteHeader(http.StatusCreated)
+	}
 	fmt.Fprint(w, shortURL)
 }
 
@@ -196,43 +173,14 @@ func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := utils.GenerateID(h.IDLength)
-	if err != nil {
-		logger.Log.Debug("Ошибка генерации ID", zap.Error(err))
-		writeJSONError(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
-		return
-	}
-
-	// Получаем userID из контекста
 	userID, _ := r.Context().Value(auth.UserIDKey).(string)
 
-	if err := h.Store.Save(r.Context(), id, originalURL, userID); err != nil {
-		if errors.Is(err, storage.ErrURLExists) {
-			existingShort, errGet := h.Store.GetByOriginalURL(r.Context(), originalURL)
-			if errGet != nil {
-				logger.Log.Error("Ошибка получения существующего URL", zap.Error(errGet))
-				writeJSONError(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
-				return
-			}
-			fullShortURL := joinShortURL(h.BaseURL, existingShort)
-			resp := model.Response{Result: fullShortURL}
-			jsonResp, errMarshal := easyjson.Marshal(resp)
-			if errMarshal != nil {
-				writeJSONError(w, "Ошибка формирования ответа", http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusConflict)
-			_, _ = w.Write(jsonResp)
-			return
-		}
-
-		logger.Log.Error("Ошибка сохранения URL", zap.Error(err))
+	shortURL, exists, err := h.svc.Shorten(r.Context(), originalURL, userID)
+	if err != nil {
 		writeJSONError(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
 		return
 	}
 
-	shortURL := joinShortURL(h.BaseURL, id)
 	resp := model.Response{Result: shortURL}
 	jsonResp, err := easyjson.Marshal(resp)
 	if err != nil {
@@ -240,10 +188,12 @@ func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.auditObserver.Notify(audit.NewEvent(audit.ActionShorten, userID, originalURL))
-
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
+	if exists {
+		w.WriteHeader(http.StatusConflict)
+	} else {
+		w.WriteHeader(http.StatusCreated)
+	}
 	_, _ = w.Write(jsonResp)
 }
 
@@ -257,7 +207,9 @@ func (h *ShortenerHandler) ShortenAPI(w http.ResponseWriter, r *http.Request) {
 // @Router       /{id} [get]
 func (h *ShortenerHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	originalURL, err := h.Store.Get(r.Context(), id)
+	userID, _ := r.Context().Value(auth.UserIDKey).(string)
+
+	originalURL, err := h.svc.Expand(r.Context(), id, userID)
 	if err != nil {
 		if errors.Is(err, storage.ErrURLDeleted) {
 			http.Error(w, "Gone", http.StatusGone)
@@ -269,9 +221,6 @@ func (h *ShortenerHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger.Log.Debug("Редирект", zap.String("id", id), zap.String("originalURL", originalURL))
-
-	userID, _ := r.Context().Value(auth.UserIDKey).(string)
-	h.auditObserver.Notify(audit.NewEvent(audit.ActionFollow, userID, originalURL))
 
 	w.Header().Set("Location", originalURL)
 	w.WriteHeader(http.StatusTemporaryRedirect)
@@ -289,7 +238,6 @@ func (h *ShortenerHandler) PingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Проверяем, реализует ли хранилище интерфейс storage.Pinger
 	p, ok := h.Store.(storage.Pinger)
 	if !ok {
 		logger.Log.Error("хранилище не поддерживает Ping")
@@ -304,6 +252,35 @@ func (h *ShortenerHandler) PingHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// Stats godoc
+// @Summary      Внутренняя статистика сервиса
+// @Tags         internal
+// @Produce      json
+// @Param        X-Real-IP header string true "IP клиента из доверенной подсети"
+// @Success      200 {object} model.StatsResponse
+// @Failure      403 {object} model.ErrorResponse
+// @Failure      500 {object} model.ErrorResponse
+// @Router       /api/internal/stats [get]
+func (h *ShortenerHandler) Stats(w http.ResponseWriter, r *http.Request) {
+	urls, users, err := h.svc.Stats(r.Context())
+	if err != nil {
+		logger.Log.Error("Ошибка получения статистики", zap.Error(err))
+		writeJSONError(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	resp := model.StatsResponse{URLs: urls, Users: users}
+	jsonResp, err := easyjson.Marshal(resp)
+	if err != nil {
+		writeJSONError(w, "Ошибка формирования ответа", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(jsonResp)
 }
 
 // ShortenBatch godoc
@@ -370,10 +347,8 @@ func (h *ShortenerHandler) ShortenBatch(w http.ResponseWriter, r *http.Request) 
 		corrList = append(corrList, corrToID{correlationID: cid, shortID: id})
 	}
 
-	// Получаем userID для привязки всех ссылок
 	userID, _ := r.Context().Value(auth.UserIDKey).(string)
 
-	// Атомарная пакетная вставка
 	if err := h.Store.SaveBatch(r.Context(), records, userID); err != nil {
 		logger.Log.Error("Ошибка пакетного сохранения", zap.Error(err))
 		writeJSONError(w, "Внутренняя ошибка сервера", http.StatusInternalServerError)
@@ -407,7 +382,6 @@ func (h *ShortenerHandler) ShortenBatch(w http.ResponseWriter, r *http.Request) 
 // @Failure      500 {object} model.ErrorResponse
 // @Router       /api/user/urls [get]
 func (h *ShortenerHandler) UserURLs(w http.ResponseWriter, r *http.Request) {
-	// Если при проверке куки был обнаружен невалидный токен – 401
 	if invalid, ok := r.Context().Value(auth.TokenInvalidKey).(bool); ok && invalid {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
@@ -421,15 +395,11 @@ func (h *ShortenerHandler) UserURLs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	urls, err := h.Store.GetUserURLs(r.Context(), userID)
+	urls, err := h.svc.ListByUser(r.Context(), userID)
 	if err != nil {
 		logger.Log.Error("Ошибка получения URL пользователя", zap.Error(err))
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
-	}
-
-	for i := range urls {
-		urls[i].ShortURL = joinShortURL(h.BaseURL, urls[i].ShortURL)
 	}
 
 	if len(urls) == 0 {
@@ -456,13 +426,11 @@ func (h *ShortenerHandler) UserURLs(w http.ResponseWriter, r *http.Request) {
 // @Failure      401 {object} model.ErrorResponse
 // @Router       /api/user/urls [delete]
 func (h *ShortenerHandler) DeleteUserURLs(w http.ResponseWriter, r *http.Request) {
-	// Если токен был невалиден – сразу 401, как в UserURLs
 	if invalid, ok := r.Context().Value(auth.TokenInvalidKey).(bool); ok && invalid {
 		writeJSONError(w, "user token is invalid", http.StatusUnauthorized)
 		return
 	}
 
-	// userID гарантированно присутствует после middleware
 	userID, _ := r.Context().Value(auth.UserIDKey).(string)
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, int64(h.MaxBodySize)))
@@ -483,14 +451,11 @@ func (h *ShortenerHandler) DeleteUserURLs(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Отправляем каждый идентификатор в канал фонового воркера (неблокирующе)
 	for _, id := range shortURLs {
 		req := deleteRequest{userID: userID, shortID: id}
 		select {
 		case h.deleteCh <- req:
-			// Успешно отправлено
 		default:
-			// Канал переполнен – логируем и отбрасываем
 			logger.Log.Warn("Канал удаления переполнен, запрос отброшен",
 				zap.String("userID", userID),
 				zap.String("shortID", id),
@@ -498,7 +463,6 @@ func (h *ShortenerHandler) DeleteUserURLs(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Немедленно отвечаем 202 Accepted
 	w.WriteHeader(http.StatusAccepted)
 }
 
@@ -507,9 +471,9 @@ func (h *ShortenerHandler) deleteWorker() {
 	defer h.deleteWg.Done()
 
 	const (
-		flushInterval = time.Second     // интервал сброса
-		maxBufferSize = 100             // максимальный суммарный размер буфера
-		flushTimeout  = 5 * time.Second // ← новое: таймаут одной серии BatchDelete
+		flushInterval = time.Second
+		maxBufferSize = 100
+		flushTimeout  = 5 * time.Second
 	)
 
 	buffer := make(map[string][]string)
@@ -517,9 +481,6 @@ func (h *ShortenerHandler) deleteWorker() {
 	ticker := time.NewTicker(flushInterval)
 	defer ticker.Stop()
 
-	// Внутренняя функция сброса буфера в хранилище.
-	// Ограничиваем себя таймаутом, чтобы зависший BatchDelete не блокировал
-	// воркер (и, как следствие, Shutdown) навсегда.
 	flush := func() {
 		if totalItems == 0 {
 			return
@@ -543,7 +504,6 @@ func (h *ShortenerHandler) deleteWorker() {
 		select {
 		case req, ok := <-h.deleteCh:
 			if !ok {
-				// Канал закрыт – финальный сброс и выход
 				flush()
 				return
 			}

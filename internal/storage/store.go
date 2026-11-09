@@ -21,5 +21,7 @@ type Store interface {
 	SaveBatch(ctx context.Context, records map[string]string, userID string) error
 	GetUserURLs(ctx context.Context, userID string) ([]model.UserURL, error)
 	BatchDelete(ctx context.Context, shortURLs []string, userID string) error
+	CountURLs(ctx context.Context) (int, error)
+	CountUsers(ctx context.Context) (int, error)
 	Close()
 }
